@@ -1,9 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# Pelican Panel Complete Installation Script
+# Pelican Panel Interactive Installation Script
 # For Debian/Ubuntu with Cloudflare Tunnel & PostgreSQL
-# Includes all fixes from our session
+# ALL settings will be asked during installation
 ################################################################################
 
 set -e
@@ -16,7 +16,7 @@ NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Pelican Panel Installation Script    ${NC}"
-echo -e "${GREEN}  With PostgreSQL & Cloudflare Tunnel  ${NC}"
+echo -e "${GREEN}  Interactive Setup Version            ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -26,13 +26,113 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# Get Cloudflare Tunnel Token
-echo -e "${YELLOW}Enter your Cloudflare Tunnel Token:${NC}"
+# ============================================================================
+# GET ALL USER INFORMATION
+# ============================================================================
+echo -e "${YELLOW}=== Configuration Setup ===${NC}"
+echo ""
+
+# Domain/Subdomain
+echo -e "${BLUE}Enter your panel domain (e.g., panel.example.com):${NC}"
+read -r PANEL_DOMAIN
+
+# Cloudflare Tunnel Token
+echo -e "${BLUE}Enter your Cloudflare Tunnel Token:${NC}"
 read -r CF_TOKEN
 
 if [ -z "$CF_TOKEN" ]; then
     echo -e "${RED}Cloudflare token is required!${NC}"
     exit 1
+fi
+
+# Database Configuration
+echo ""
+echo -e "${YELLOW}=== Database Configuration ===${NC}"
+echo -e "${BLUE}Choose database type:${NC}"
+echo "1) PostgreSQL (Recommended for production)"
+echo "2) MySQL/MariaDB"
+read -r DB_TYPE
+
+if [ "$DB_TYPE" = "1" ]; then
+    DB_DRIVER="pgsql"
+    DB_PORT_DEFAULT="5432"
+    echo -e "${GREEN}Using PostgreSQL${NC}"
+else
+    DB_DRIVER="mysql"
+    DB_PORT_DEFAULT="3306"
+    echo -e "${GREEN}Using MySQL${NC}"
+fi
+
+echo -e "${BLUE}Database Host (e.g., localhost or remote host):${NC}"
+read -r DB_HOST
+
+echo -e "${BLUE}Database Port [${DB_PORT_DEFAULT}]:${NC}"
+read -r DB_PORT
+DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
+
+echo -e "${BLUE}Database Name:${NC}"
+read -r DB_NAME
+
+echo -e "${BLUE}Database Username:${NC}"
+read -r DB_USER
+
+echo -e "${BLUE}Database Password:${NC}"
+read -rs DB_PASS
+echo ""
+
+# Redis Configuration
+echo ""
+echo -e "${YELLOW}=== Redis Configuration ===${NC}"
+echo -e "${BLUE}Redis Host [127.0.0.1]:${NC}"
+read -r REDIS_HOST
+REDIS_HOST=${REDIS_HOST:-127.0.0.1}
+
+echo -e "${BLUE}Redis Port [6379]:${NC}"
+read -r REDIS_PORT
+REDIS_PORT=${REDIS_PORT:-6379}
+
+echo -e "${BLUE}Redis Password (leave empty if none):${NC}"
+read -rs REDIS_PASS
+echo ""
+
+# Email Configuration
+echo ""
+echo -e "${YELLOW}=== Email Configuration ===${NC}"
+echo -e "${BLUE}SMTP Host (e.g., smtp.gmail.com):${NC}"
+read -r MAIL_HOST
+
+echo -e "${BLUE}SMTP Port [587]:${NC}"
+read -r MAIL_PORT
+MAIL_PORT=${MAIL_PORT:-587}
+
+echo -e "${BLUE}SMTP Username:${NC}"
+read -r MAIL_USER
+
+echo -e "${BLUE}SMTP Password:${NC}"
+read -rs MAIL_PASS
+echo ""
+
+echo -e "${BLUE}From Email Address:${NC}"
+read -r MAIL_FROM
+
+echo -e "${BLUE}From Name:${NC}"
+read -r MAIL_FROM_NAME
+
+# Confirm Settings
+echo ""
+echo -e "${YELLOW}=== Configuration Summary ===${NC}"
+echo -e "Panel Domain: ${GREEN}${PANEL_DOMAIN}${NC}"
+echo -e "Database: ${GREEN}${DB_DRIVER}${NC} at ${GREEN}${DB_HOST}:${DB_PORT}${NC}"
+echo -e "Database Name: ${GREEN}${DB_NAME}${NC}"
+echo -e "Redis: ${GREEN}${REDIS_HOST}:${REDIS_PORT}${NC}"
+echo -e "SMTP: ${GREEN}${MAIL_HOST}:${MAIL_PORT}${NC}"
+echo ""
+echo -e "${YELLOW}Continue with installation? (yes/no):${NC}"
+read -r CONFIRM
+
+if [[ ! "$CONFIRM" =~ ^[Yy][Ee]?[Ss]?$ ]]; then
+    echo -e "${RED}Installation cancelled.${NC}"
+    exit 0
 fi
 
 echo ""
@@ -50,35 +150,28 @@ apt update && apt upgrade -y
 # ============================================================================
 echo -e "${YELLOW}[2/16] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget git tar unzip telnet
+    gnupg lsb-release wget git tar unzip
 
 # ============================================================================
-# STEP 3: Add PHP 8.4 Repository (Debian/Ubuntu)
+# STEP 3: Add PHP 8.4 Repository
 # ============================================================================
 echo -e "${YELLOW}[3/16] Adding PHP 8.4 repository...${NC}"
 
-# Detect OS
 if [ -f /etc/debian_version ]; then
-    # Debian
     wget -O /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
 elif [ -f /etc/lsb-release ]; then
-    # Ubuntu
     add-apt-repository ppa:ondrej/php -y
 fi
 
-# Remove any conflicting old PHP repositories
 rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null || true
-
 apt update
 
 # ============================================================================
-# STEP 4: Install PHP 8.4 with ALL Required Extensions
+# STEP 4: Install PHP 8.4
 # ============================================================================
 echo -e "${YELLOW}[4/16] Installing PHP 8.4...${NC}"
 apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,dom,redis,pgsql}
-
-# Set PHP 8.4 as default
 update-alternatives --set php /usr/bin/php8.4 || true
 
 # ============================================================================
@@ -88,10 +181,14 @@ echo -e "${YELLOW}[5/16] Installing Nginx...${NC}"
 apt install -y nginx
 
 # ============================================================================
-# STEP 6: Install PostgreSQL Client
+# STEP 6: Install Database Client
 # ============================================================================
-echo -e "${YELLOW}[6/16] Installing PostgreSQL client...${NC}"
-apt install -y postgresql-client
+echo -e "${YELLOW}[6/16] Installing database client...${NC}"
+if [ "$DB_DRIVER" = "pgsql" ]; then
+    apt install -y postgresql-client
+else
+    apt install -y mysql-client
+fi
 
 # ============================================================================
 # STEP 7: Install Redis
@@ -128,9 +225,31 @@ COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
 # ============================================================================
 echo -e "${YELLOW}[11/16] Setting up environment...${NC}"
 cp .env.example .env
+
+# Configure .env file with user inputs
+sed -i "s|APP_URL=.*|APP_URL=https://${PANEL_DOMAIN}|" .env
+sed -i "s|DB_CONNECTION=.*|DB_CONNECTION=${DB_DRIVER}|" .env
+sed -i "s|DB_HOST=.*|DB_HOST=${DB_HOST}|" .env
+sed -i "s|DB_PORT=.*|DB_PORT=${DB_PORT}|" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_NAME}|" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|" .env
+
+sed -i "s|REDIS_HOST=.*|REDIS_HOST=${REDIS_HOST}|" .env
+sed -i "s|REDIS_PORT=.*|REDIS_PORT=${REDIS_PORT}|" .env
+if [ -n "$REDIS_PASS" ]; then
+    sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|" .env
+fi
+
+sed -i "s|MAIL_HOST=.*|MAIL_HOST=${MAIL_HOST}|" .env
+sed -i "s|MAIL_PORT=.*|MAIL_PORT=${MAIL_PORT}|" .env
+sed -i "s|MAIL_USERNAME=.*|MAIL_USERNAME=${MAIL_USER}|" .env
+sed -i "s|MAIL_PASSWORD=.*|MAIL_PASSWORD=${MAIL_PASS}|" .env
+sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=${MAIL_FROM}|" .env
+sed -i "s|MAIL_FROM_NAME=.*|MAIL_FROM_NAME=\"${MAIL_FROM_NAME}\"|" .env
+
 php artisan key:generate --force
 
-# Display APP_KEY for backup
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}IMPORTANT: BACKUP YOUR APP_KEY!${NC}"
@@ -148,24 +267,22 @@ chmod -R 755 storage/* bootstrap/cache/
 chown -R www-data:www-data /var/www/pelican
 
 # ============================================================================
-# STEP 13: Configure Nginx with HTTPS
+# STEP 13: Configure Nginx
 # ============================================================================
 echo -e "${YELLOW}[13/16] Configuring Nginx...${NC}"
 
-# Generate self-signed SSL certificate
 mkdir -p /etc/ssl/pelican
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/ssl/pelican/key.pem \
   -out /etc/ssl/pelican/cert.pem \
-  -subj "/CN=panel.nexusbot.qzz.io" 2>/dev/null
+  -subj "/CN=${PANEL_DOMAIN}" 2>/dev/null
 
-# Create Nginx config
-cat > /etc/nginx/sites-available/pelican.conf <<'NGINXEOF'
+cat > /etc/nginx/sites-available/pelican.conf <<NGINXEOF
 server_tokens off;
 
 server {
     listen 443 ssl http2;
-    server_name _;
+    server_name ${PANEL_DOMAIN};
 
     ssl_certificate /etc/ssl/pelican/cert.pem;
     ssl_certificate_key /etc/ssl/pelican/key.pem;
@@ -182,7 +299,7 @@ server {
     sendfile off;
 
     location / {
-        try_files $uri $uri/ /index.php?$query_string;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
     location ~ \.php$ {
@@ -190,8 +307,8 @@ server {
         fastcgi_pass unix:/run/php/php8.4-fpm.sock;
         fastcgi_index index.php;
         include fastcgi_params;
-        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \\n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param HTTP_PROXY "";
         fastcgi_intercept_errors off;
         fastcgi_buffer_size 16k;
@@ -207,7 +324,6 @@ server {
 }
 NGINXEOF
 
-# Enable Nginx site
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/pelican.conf /etc/nginx/sites-enabled/pelican.conf
 nginx -t
@@ -249,23 +365,17 @@ echo -e "${YELLOW}[15/16] Setting up cron...${NC}"
 # ============================================================================
 echo -e "${YELLOW}[16/16] Installing Cloudflare Tunnel...${NC}"
 
-# Download cloudflared
 wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 dpkg -i cloudflared-linux-amd64.deb
 rm cloudflared-linux-amd64.deb
 
-# Uninstall any existing service
 cloudflared service uninstall 2>/dev/null || true
-
-# Install with token
 cloudflared service install "$CF_TOKEN"
-
-# Start service
 systemctl start cloudflared
 systemctl enable cloudflared
 
 # ============================================================================
-# Enable all services on boot
+# Enable all services
 # ============================================================================
 systemctl enable nginx php8.4-fpm redis-server pelican-queue cloudflared
 
@@ -274,42 +384,28 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Installation Complete!              ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "${YELLOW}IMPORTANT INFORMATION:${NC}"
+echo -e "${YELLOW}NEXT STEPS:${NC}"
 echo ""
-echo -e "${GREEN}1. APP_KEY Location:${NC} /var/www/pelican/.env"
-echo -e "   ${RED}BACKUP THIS KEY NOW!${NC}"
-echo ""
-echo -e "${GREEN}2. Complete installation at:${NC}"
-echo -e "   ${BLUE}https://panel.nexusbot.qzz.io/installer${NC}"
-echo ""
-echo -e "${GREEN}3. Cloudflare Tunnel Configuration:${NC}"
+echo -e "${GREEN}1. Configure Cloudflare Tunnel:${NC}"
 echo -e "   Go to: https://one.dash.cloudflare.com/"
 echo -e "   Networks → Tunnels → Configure → Public Hostname"
 echo ""
 echo -e "   ${YELLOW}Add this route:${NC}"
-echo -e "   - Subdomain: ${BLUE}panel${NC}"
-echo -e "   - Domain: ${BLUE}nexusbot.qzz.io${NC}"
+echo -e "   - Subdomain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f1)${NC}"
+echo -e "   - Domain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f2-)${NC}"
 echo -e "   - Service Type: ${BLUE}HTTPS${NC}"
 echo -e "   - URL: ${BLUE}localhost:443${NC}"
 echo -e "   - Additional Settings → ${BLUE}No TLS Verify: ON${NC}"
 echo ""
-echo -e "${GREEN}4. Database Setup:${NC}"
-echo -e "   Use your Supabase PostgreSQL database:"
-echo -e "   - Driver: ${BLUE}PostgreSQL${NC}"
-echo -e "   - Host: ${BLUE}aws-0-us-west-2.pooler.supabase.com${NC}"
-echo -e "   - Port: ${BLUE}5432${NC} (NOT 6543!)"
-echo -e "   - Database: ${BLUE}postgres${NC}"
-echo ""
-echo -e "${GREEN}5. Cache/Queue/Session:${NC}"
-echo -e "   Use ${BLUE}Redis${NC} for all three:"
-echo -e "   - Host: ${BLUE}127.0.0.1${NC}"
-echo -e "   - Port: ${BLUE}6379${NC}"
-echo -e "   - Password: ${BLUE}(leave empty)${NC}"
-echo ""
-echo -e "${GREEN}6. After web installation, create admin user:${NC}"
+echo -e "${GREEN}2. Run Database Migrations:${NC}"
 echo -e "   ${BLUE}cd /var/www/pelican${NC}"
-echo -e "   ${BLUE}sudo php artisan migrate --force${NC}"
-echo -e "   ${BLUE}sudo php artisan p:user:make${NC}"
+echo -e "   ${BLUE}php artisan migrate --force${NC}"
+echo ""
+echo -e "${GREEN}3. Create Admin User:${NC}"
+echo -e "   ${BLUE}php artisan p:user:make${NC}"
+echo ""
+echo -e "${GREEN}4. Access Your Panel:${NC}"
+echo -e "   ${BLUE}https://${PANEL_DOMAIN}${NC}"
 echo ""
 echo -e "${YELLOW}Services Status:${NC}"
 systemctl status nginx --no-pager -l | head -3
@@ -318,5 +414,5 @@ systemctl status redis-server --no-pager -l | head -3
 systemctl status pelican-queue --no-pager -l | head -3
 systemctl status cloudflared --no-pager -l | head -3
 echo ""
-echo -e "${GREEN}All done! Visit the installer to complete setup.${NC}"
+echo -e "${GREEN}All done!${NC}"
 echo ""
