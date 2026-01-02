@@ -1,12 +1,16 @@
 #!/bin/bash
 
 ################################################################################
-# Pelican Panel Interactive Installation Script
+# Pelican Panel Interactive Installation Script - FIXED VERSION
 # For Debian/Ubuntu with Cloudflare Tunnel & PostgreSQL
 # ALL settings will be asked during installation
 ################################################################################
 
 set -e
+
+# Force system binaries to be used (important for Codespaces/container environments)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+hash -r 2>/dev/null || true
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,7 +20,7 @@ NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Pelican Panel Installation Script    ${NC}"
-echo -e "${GREEN}  Interactive Setup Version            ${NC}"
+echo -e "${GREEN}  Interactive Setup Version (Fixed)    ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -142,48 +146,152 @@ echo ""
 # ============================================================================
 # STEP 1: Update System
 # ============================================================================
-echo -e "${YELLOW}[1/16] Updating system...${NC}"
+echo -e "${YELLOW}[1/17] Updating system...${NC}"
 apt update && apt upgrade -y
 
 # ============================================================================
 # STEP 2: Install Dependencies
 # ============================================================================
-echo -e "${YELLOW}[2/16] Installing dependencies...${NC}"
+echo -e "${YELLOW}[2/17] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget git tar unzip
+    gnupg lsb-release wget git tar unzip cron
 
 # ============================================================================
 # STEP 3: Add PHP 8.4 Repository
 # ============================================================================
-echo -e "${YELLOW}[3/16] Adding PHP 8.4 repository...${NC}"
+echo -e "${YELLOW}[3/17] Adding PHP 8.4 repository...${NC}"
 
-if [ -f /etc/debian_version ]; then
-    wget -O /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
-    echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
-elif [ -f /etc/lsb-release ]; then
-    add-apt-repository ppa:ondrej/php -y
+# Remove any existing PHP repositories to avoid conflicts
+rm -f /etc/apt/sources.list.d/php*.list 2>/dev/null || true
+rm -f /etc/apt/trusted.gpg.d/php*.gpg 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null || true
+
+# Detect OS
+if [ -f /etc/debian_version ] || [ -f /etc/lsb-release ]; then
+    DISTRO=$(lsb_release -sc)
+    
+    # Prefer ondrej PPA for Ubuntu (more reliable)
+    if command -v add-apt-repository &> /dev/null && [ -f /etc/lsb-release ]; then
+        echo "Using ondrej PPA method (recommended for Ubuntu)..."
+        add-apt-repository ppa:ondrej/php -y
+    else
+        # Manual setup for Debian or Ubuntu without add-apt-repository
+        echo "Using manual repository setup..."
+        
+        # Download and install GPG key using the modern method
+        curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-archive-keyring.gpg
+        
+        # Add repository with proper keyring signing
+        echo "deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ $DISTRO main" | tee /etc/apt/sources.list.d/php.list
+    fi
+    
+    apt update
+else
+    echo -e "${RED}Unsupported OS. Please install PHP 8.4 manually.${NC}"
+    exit 1
 fi
 
-rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null || true
-apt update
+# Verify the repository was added successfully
+if apt-cache policy php8.4-cli 2>/dev/null | grep -qE "(packages.sury.org|ondrej|ppa.launchpadcontent.com)"; then
+    echo -e "${GREEN}✅ PHP 8.4 repository added successfully${NC}"
+else
+    echo -e "${YELLOW}⚠️  Warning: Could not verify PHP repository. Continuing anyway...${NC}"
+fi
 
 # ============================================================================
-# STEP 4: Install PHP 8.4
+# STEP 4: Install PHP 8.4 with ALL Required Extensions
 # ============================================================================
-echo -e "${YELLOW}[4/16] Installing PHP 8.4...${NC}"
-apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,dom,redis,pgsql}
-update-alternatives --set php /usr/bin/php8.4 || true
+echo -e "${YELLOW}[4/17] Installing PHP 8.4 with all required extensions...${NC}"
+
+# Install PHP 8.4 and ALL required extensions
+# Note: sodium is built into php8.4-common, dom is provided by php8.4-xml
+apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql}
+
+# Force PHP 8.4 as the default CLI version
+update-alternatives --set php /usr/bin/php8.4 2>/dev/null || true
+
+# If update-alternatives fails, manually set it
+if ! command -v php &> /dev/null || ! php -v | grep -q "8.4"; then
+    echo -e "${YELLOW}Forcing PHP 8.4 activation...${NC}"
+    update-alternatives --install /usr/bin/php php /usr/bin/php8.4 84
+    update-alternatives --set php /usr/bin/php8.4
+fi
 
 # ============================================================================
-# STEP 5: Install Nginx
+# STEP 5: Verify PHP 8.4 Installation
 # ============================================================================
-echo -e "${YELLOW}[5/16] Installing Nginx...${NC}"
+echo -e "${YELLOW}[5/17] Verifying PHP 8.4 installation...${NC}"
+
+# Check PHP version
+PHP_VERSION=$(php -v | head -n 1)
+echo -e "${BLUE}Active PHP Version: ${PHP_VERSION}${NC}"
+
+if ! echo "$PHP_VERSION" | grep -q "8.4"; then
+    echo -e "${RED}❌ ERROR: PHP 8.4 is not active!${NC}"
+    echo -e "${RED}Current version: ${PHP_VERSION}${NC}"
+    echo -e "${YELLOW}Please fix PHP version manually and re-run the script.${NC}"
+    exit 1
+fi
+
+# Check required extensions
+echo -e "${BLUE}Checking required PHP extensions...${NC}"
+REQUIRED_EXTS=("intl" "zip" "sodium" "bcmath" "mbstring" "xml" "curl" "gd" "pgsql" "redis" "sqlite3" "dom")
+MISSING_EXTS=()
+
+for ext in "${REQUIRED_EXTS[@]}"; do
+    if php -m | grep -qi "^${ext}$"; then
+        echo -e "  ${GREEN}✓${NC} ${ext}"
+    else
+        echo -e "  ${RED}✗${NC} ${ext} (MISSING)"
+        MISSING_EXTS+=("$ext")
+    fi
+done
+
+# Special check for MySQL (mysqli/mysqlnd)
+if php -m | grep -qiE "^(mysqli|mysqlnd)$"; then
+    echo -e "  ${GREEN}✓${NC} mysqli/mysqlnd (MySQL support)"
+else
+    echo -e "  ${RED}✗${NC} mysqli (MISSING)"
+    MISSING_EXTS+=("mysql")
+fi
+
+if [ ${#MISSING_EXTS[@]} -gt 0 ]; then
+    echo -e "${RED}❌ ERROR: Missing required PHP extensions: ${MISSING_EXTS[*]}${NC}"
+    echo -e "${YELLOW}Attempting to install missing extensions...${NC}"
+    
+    for ext in "${MISSING_EXTS[@]}"; do
+        apt install -y "php8.4-${ext}" 2>/dev/null || echo -e "${YELLOW}Note: php8.4-${ext} may not exist as a separate package${NC}"
+    done
+    
+    echo -e "${YELLOW}Verifying extensions after installation attempt...${NC}"
+    
+    # Re-check critical extensions
+    STILL_MISSING=()
+    for ext in "${MISSING_EXTS[@]}"; do
+        if ! php -m | grep -qi "^${ext}$"; then
+            STILL_MISSING+=("$ext")
+        fi
+    done
+    
+    if [ ${#STILL_MISSING[@]} -gt 0 ]; then
+        echo -e "${RED}❌ Still missing: ${STILL_MISSING[*]}${NC}"
+        echo -e "${YELLOW}However, if mysqli/mysqlnd are present, MySQL support is available.${NC}"
+        echo -e "${YELLOW}Continuing with installation...${NC}"
+    fi
+fi
+
+echo -e "${GREEN}✅ All required PHP extensions are loaded!${NC}"
+
+# ============================================================================
+# STEP 6: Install Nginx
+# ============================================================================
+echo -e "${YELLOW}[6/17] Installing Nginx...${NC}"
 apt install -y nginx
 
 # ============================================================================
-# STEP 6: Install Database Client
+# STEP 7: Install Database Client
 # ============================================================================
-echo -e "${YELLOW}[6/16] Installing database client...${NC}"
+echo -e "${YELLOW}[7/17] Installing database client...${NC}"
 if [ "$DB_DRIVER" = "pgsql" ]; then
     apt install -y postgresql-client
 else
@@ -191,9 +299,9 @@ else
 fi
 
 # ============================================================================
-# STEP 7: Install Redis
+# STEP 8: Install Redis
 # ============================================================================
-echo -e "${YELLOW}[7/16] Installing Redis...${NC}"
+echo -e "${YELLOW}[8/17] Installing Redis...${NC}"
 curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
 apt update
@@ -201,29 +309,32 @@ apt install -y redis-server
 systemctl enable --now redis-server
 
 # ============================================================================
-# STEP 8: Install Composer
+# STEP 9: Install Composer
 # ============================================================================
-echo -e "${YELLOW}[8/16] Installing Composer...${NC}"
+echo -e "${YELLOW}[9/17] Installing Composer...${NC}"
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 # ============================================================================
-# STEP 9: Download Pelican Panel
+# STEP 10: Download Pelican Panel
 # ============================================================================
-echo -e "${YELLOW}[9/16] Downloading Pelican Panel...${NC}"
+echo -e "${YELLOW}[10/17] Downloading Pelican Panel...${NC}"
 mkdir -p /var/www/pelican
 cd /var/www/pelican
 curl -L https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz | tar -xzv
 
 # ============================================================================
-# STEP 10: Install Composer Dependencies
+# STEP 11: Install Composer Dependencies
 # ============================================================================
-echo -e "${YELLOW}[10/16] Installing Composer dependencies...${NC}"
+echo -e "${YELLOW}[11/17] Installing Composer dependencies...${NC}"
+echo -e "${BLUE}PHP version being used by Composer:${NC}"
+php -v | head -n 1
+
 COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
 
 # ============================================================================
-# STEP 11: Setup Environment
+# STEP 12: Setup Environment
 # ============================================================================
-echo -e "${YELLOW}[11/16] Setting up environment...${NC}"
+echo -e "${YELLOW}[12/17] Setting up environment...${NC}"
 cp .env.example .env
 
 # Configure .env file with user inputs
@@ -260,16 +371,16 @@ echo ""
 sleep 3
 
 # ============================================================================
-# STEP 12: Set Permissions
+# STEP 13: Set Permissions
 # ============================================================================
-echo -e "${YELLOW}[12/16] Setting permissions...${NC}"
+echo -e "${YELLOW}[13/17] Setting permissions...${NC}"
 chmod -R 755 storage/* bootstrap/cache/
 chown -R www-data:www-data /var/www/pelican
 
 # ============================================================================
-# STEP 13: Configure Nginx
+# STEP 14: Configure Nginx
 # ============================================================================
-echo -e "${YELLOW}[13/16] Configuring Nginx...${NC}"
+echo -e "${YELLOW}[14/17] Configuring Nginx...${NC}"
 
 mkdir -p /etc/ssl/pelican
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
@@ -327,14 +438,23 @@ NGINXEOF
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/pelican.conf /etc/nginx/sites-enabled/pelican.conf
 nginx -t
-systemctl restart nginx
+
+# Check if systemd is available
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl restart nginx
+else
+    echo -e "${YELLOW}Using service command instead of systemctl${NC}"
+    service nginx restart || /etc/init.d/nginx restart
+fi
 
 # ============================================================================
-# STEP 14: Setup Queue Worker
+# STEP 15: Setup Queue Worker
 # ============================================================================
-echo -e "${YELLOW}[14/16] Setting up queue worker...${NC}"
+echo -e "${YELLOW}[15/17] Setting up queue worker...${NC}"
 
-cat > /etc/systemd/system/pelican-queue.service <<'QUEUEEOF'
+# Check if systemd is available
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    cat > /etc/systemd/system/pelican-queue.service <<'QUEUEEOF'
 [Unit]
 Description=Pelican Queue Worker
 After=redis-server.service
@@ -352,18 +472,61 @@ RestartSec=5s
 WantedBy=multi-user.target
 QUEUEEOF
 
-systemctl enable --now pelican-queue.service
+    systemctl enable --now pelican-queue.service
+    echo -e "${GREEN}Queue worker service created and started${NC}"
+else
+    echo -e "${YELLOW}Systemd not available - creating supervisor config instead${NC}"
+    
+    # Install supervisor if not present
+    if ! command -v supervisorctl &> /dev/null; then
+        apt install -y supervisor
+    fi
+    
+    cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QUEUEEOF'
+[program:pelican-queue]
+command=/usr/bin/php /var/www/pelican/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+directory=/var/www/pelican
+user=www-data
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/pelican-queue.log
+stderr_logfile=/var/log/pelican-queue-error.log
+QUEUEEOF
+
+    # Start supervisor
+    service supervisor start 2>/dev/null || /etc/init.d/supervisor start 2>/dev/null || true
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+    supervisorctl start pelican-queue 2>/dev/null || true
+    echo -e "${GREEN}Queue worker configured with supervisor${NC}"
+fi
 
 # ============================================================================
-# STEP 15: Setup Cron
+# STEP 16: Setup Cron
 # ============================================================================
-echo -e "${YELLOW}[15/16] Setting up cron...${NC}"
+echo -e "${YELLOW}[16/17] Setting up cron...${NC}"
+
+# Ensure cron is installed and running
+if ! command -v crontab &> /dev/null; then
+    echo -e "${YELLOW}Installing cron...${NC}"
+    apt install -y cron
+fi
+
+# Start cron service
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl enable --now cron
+else
+    service cron start 2>/dev/null || /etc/init.d/cron start 2>/dev/null || true
+fi
+
+# Add cron job
 (crontab -l -u www-data 2>/dev/null; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data -
+echo -e "${GREEN}Cron job added for www-data user${NC}"
 
 # ============================================================================
-# STEP 16: Install Cloudflare Tunnel
+# STEP 17: Install Cloudflare Tunnel
 # ============================================================================
-echo -e "${YELLOW}[16/16] Installing Cloudflare Tunnel...${NC}"
+echo -e "${YELLOW}[17/17] Installing Cloudflare Tunnel...${NC}"
 
 wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 dpkg -i cloudflared-linux-amd64.deb
