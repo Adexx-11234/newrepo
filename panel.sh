@@ -458,7 +458,11 @@ QUEUEEOF
     systemctl daemon-reload
     systemctl enable --now pelican-queue.service
 else
-    apt install -y supervisor
+    # Install supervisor
+    apt install -y supervisor 2>/dev/null || true
+    
+    # Create supervisor config
+    mkdir -p /etc/supervisor/conf.d
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QUEUEEOF'
 [program:pelican-queue]
 command=/usr/bin/php /var/www/pelican/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
@@ -470,10 +474,15 @@ stdout_logfile=/var/log/pelican-queue.log
 stderr_logfile=/var/log/pelican-queue-error.log
 QUEUEEOF
 
-    service supervisor restart 2>/dev/null || supervisord
-    supervisorctl reread
-    supervisorctl update
-    supervisorctl start pelican-queue
+    # Try to start supervisor
+    service supervisor restart 2>/dev/null || supervisord 2>/dev/null || {
+        echo -e "${YELLOW}Warning: Supervisor may not be running. Queue will need manual start.${NC}"
+    }
+    
+    # Try to update supervisor
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+    supervisorctl start pelican-queue 2>/dev/null || true
 fi
 
 # Setup Cron
@@ -482,12 +491,14 @@ if ! command -v crontab &> /dev/null; then
 fi
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl enable --now cron
+    systemctl enable --now cron 2>/dev/null || service cron start 2>/dev/null || true
 else
-    service cron start 2>/dev/null || cron
+    service cron start 2>/dev/null || cron 2>/dev/null || true
 fi
 
 (crontab -l -u www-data 2>/dev/null; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data -
+
+echo -e "${GREEN}✅ Queue worker configured${NC}"
 
 # ============================================================================
 # STEP 17: Install Cloudflare Tunnel
