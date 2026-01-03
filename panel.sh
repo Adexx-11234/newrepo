@@ -1,14 +1,13 @@
 #!/bin/bash
 
 ################################################################################
-# Pelican Panel Interactive Installation Script - UNIVERSAL VERSION
+# Pelican Panel Interactive Installation Script - UNIVERSAL VERSION v2
 # For Debian/Ubuntu - Works on VPS, Codespaces, Docker, Sandbox
-# Uses port 8443 for Nginx (compatible with all environments)
+# Fixed: systemd detection, supervisor, cloudflared
 ################################################################################
 
 set -e
 
-# Force system binaries to be used
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 hash -r 2>/dev/null || true
 
@@ -20,11 +19,10 @@ NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Pelican Panel Installation Script    ${NC}"
-echo -e "${GREEN}  Universal Version (All Environments) ${NC}"
+echo -e "${GREEN}  Universal Version v2 (Fixed)         ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
-# Check if running as root
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}This script must be run as root${NC}" 
    exit 1
@@ -38,11 +36,16 @@ echo -e "${YELLOW}=== Detecting Environment ===${NC}"
 HAS_SYSTEMD=false
 IS_CONTAINER=false
 
-if pidof systemd >/dev/null 2>&1; then
-    HAS_SYSTEMD=true
-    echo -e "${GREEN}✅ Systemd detected${NC}"
+# Better systemd detection
+if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
+    if systemctl is-system-running >/dev/null 2>&1 || systemctl is-system-running --quiet 2>&1; then
+        HAS_SYSTEMD=true
+        echo -e "${GREEN}✅ Systemd detected and running${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Systemd exists but not running - using service commands${NC}"
+    fi
 else
-    echo -e "${YELLOW}⚠️  No systemd - using alternative process management${NC}"
+    echo -e "${YELLOW}⚠️  No systemd - using service commands${NC}"
 fi
 
 if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
@@ -65,11 +68,9 @@ echo ""
 echo -e "${YELLOW}=== Configuration Setup ===${NC}"
 echo ""
 
-# Domain/Subdomain
 echo -e "${BLUE}Enter your panel domain (e.g., panel.example.com):${NC}"
 read -r PANEL_DOMAIN
 
-# Cloudflare Tunnel Token
 echo -e "${BLUE}Enter your Cloudflare Tunnel Token:${NC}"
 read -r CF_TOKEN
 
@@ -78,7 +79,6 @@ if [ -z "$CF_TOKEN" ]; then
     exit 1
 fi
 
-# Database Configuration
 echo ""
 echo -e "${YELLOW}=== Database Configuration ===${NC}"
 echo -e "${BLUE}Choose database type:${NC}"
@@ -96,7 +96,7 @@ else
     echo -e "${GREEN}Using MySQL${NC}"
 fi
 
-echo -e "${BLUE}Database Host (e.g., localhost):${NC}"
+echo -e "${BLUE}Database Host:${NC}"
 read -r DB_HOST
 
 echo -e "${BLUE}Database Port [${DB_PORT_DEFAULT}]:${NC}"
@@ -113,7 +113,6 @@ echo -e "${BLUE}Database Password:${NC}"
 read -rs DB_PASS
 echo ""
 
-# Redis Configuration
 echo ""
 echo -e "${YELLOW}=== Redis Configuration ===${NC}"
 echo -e "${BLUE}Redis Host [127.0.0.1]:${NC}"
@@ -128,7 +127,6 @@ echo -e "${BLUE}Redis Password (leave empty if none):${NC}"
 read -rs REDIS_PASS
 echo ""
 
-# Email Configuration
 echo ""
 echo -e "${YELLOW}=== Email Configuration ===${NC}"
 echo -e "${BLUE}SMTP Host (e.g., smtp.gmail.com):${NC}"
@@ -151,7 +149,6 @@ read -r MAIL_FROM
 echo -e "${BLUE}From Name:${NC}"
 read -r MAIL_FROM_NAME
 
-# Confirm Settings
 echo ""
 echo -e "${YELLOW}=== Configuration Summary ===${NC}"
 echo -e "Panel Domain: ${GREEN}${PANEL_DOMAIN}${NC}"
@@ -178,7 +175,6 @@ echo ""
 # ============================================================================
 echo -e "${YELLOW}[1/17] Updating system...${NC}"
 
-# Configure dpkg for container environments
 mkdir -p /etc/dpkg/dpkg.cfg.d
 cat > /etc/dpkg/dpkg.cfg.d/docker <<'DPKGEOF'
 force-unsafe-io
@@ -193,9 +189,9 @@ apt upgrade -y || echo -e "${YELLOW}Some packages failed to upgrade, continuing.
 echo -e "${YELLOW}[2/17] Installing dependencies...${NC}"
 
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget tar unzip git cron sudo 2>/dev/null || {
-    for pkg in software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release wget tar unzip git cron sudo; do
-        apt install -y "$pkg" 2>/dev/null || echo -e "${YELLOW}Warning: $pkg may have issues${NC}"
+    gnupg lsb-release wget tar unzip git cron sudo supervisor 2>/dev/null || {
+    for pkg in software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release wget tar unzip git cron sudo supervisor; do
+        apt install -y "$pkg" 2>/dev/null || echo -e "${YELLOW}Warning: $pkg installation had issues${NC}"
     done
 }
 
@@ -277,7 +273,8 @@ apt update
 apt install -y redis-server
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl enable --now redis-server
+    systemctl enable redis-server 2>/dev/null || true
+    systemctl start redis-server 2>/dev/null || service redis-server start
 else
     service redis-server start 2>/dev/null || redis-server --daemonize yes
 fi
@@ -348,16 +345,15 @@ chmod -R 755 storage/* bootstrap/cache/
 chown -R www-data:www-data /var/www/pelican
 
 # ============================================================================
-# STEP 14: Configure PHP-FPM for Port 9000 (Container-Safe)
+# STEP 14: Configure PHP-FPM
 # ============================================================================
 echo -e "${YELLOW}[14/17] Configuring PHP-FPM...${NC}"
 
-# Change PHP-FPM to use TCP instead of socket (more reliable in containers)
 sed -i 's|listen = /run/php/php8.4-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/8.4/fpm/pool.d/www.conf
 sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/8.4/fpm/pool.d/www.conf
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart php8.4-fpm
+    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart
 else
     service php8.4-fpm restart 2>/dev/null || php-fpm8.4 -D
 fi
@@ -426,17 +422,18 @@ ln -sf /etc/nginx/sites-available/pelican.conf /etc/nginx/sites-enabled/pelican.
 nginx -t
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart nginx
+    systemctl restart nginx 2>/dev/null || service nginx restart
 else
     service nginx restart 2>/dev/null || nginx -s reload
 fi
 
 # ============================================================================
-# STEP 16: Setup Queue Worker
+# STEP 16: Setup Queue Worker & Cron
 # ============================================================================
-echo -e "${YELLOW}[16/17] Setting up queue worker...${NC}"
+echo -e "${YELLOW}[16/17] Setting up queue worker and cron...${NC}"
 
 if [ "$HAS_SYSTEMD" = true ]; then
+    # Try systemd first
     cat > /etc/systemd/system/pelican-queue.service <<'QUEUEEOF'
 [Unit]
 Description=Pelican Queue Worker
@@ -456,12 +453,15 @@ WantedBy=multi-user.target
 QUEUEEOF
 
     systemctl daemon-reload
-    systemctl enable --now pelican-queue.service
-else
-    # Install supervisor
-    apt install -y supervisor 2>/dev/null || true
-    
-    # Create supervisor config
+    systemctl enable pelican-queue.service 2>/dev/null || true
+    systemctl start pelican-queue.service 2>/dev/null || {
+        echo -e "${YELLOW}Systemd service creation failed, falling back to supervisor${NC}"
+        HAS_SYSTEMD=false
+    }
+fi
+
+if [ "$HAS_SYSTEMD" = false ]; then
+    # Use supervisor as fallback
     mkdir -p /etc/supervisor/conf.d
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QUEUEEOF'
 [program:pelican-queue]
@@ -474,31 +474,31 @@ stdout_logfile=/var/log/pelican-queue.log
 stderr_logfile=/var/log/pelican-queue-error.log
 QUEUEEOF
 
-    # Try to start supervisor
-    service supervisor restart 2>/dev/null || supervisord 2>/dev/null || {
-        echo -e "${YELLOW}Warning: Supervisor may not be running. Queue will need manual start.${NC}"
+    # Start supervisor
+    mkdir -p /var/run/supervisor
+    service supervisor restart 2>/dev/null || supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || {
+        # Start supervisord manually if service fails
+        /usr/bin/supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
     }
     
-    # Try to update supervisor
+    sleep 2
+    
     supervisorctl reread 2>/dev/null || true
     supervisorctl update 2>/dev/null || true
     supervisorctl start pelican-queue 2>/dev/null || true
 fi
 
 # Setup Cron
-if ! command -v crontab &> /dev/null; then
-    apt install -y cron
-fi
-
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl enable --now cron 2>/dev/null || service cron start 2>/dev/null || true
+    systemctl enable cron 2>/dev/null || true
+    systemctl start cron 2>/dev/null || service cron start 2>/dev/null || true
 else
     service cron start 2>/dev/null || cron 2>/dev/null || true
 fi
 
 (crontab -l -u www-data 2>/dev/null; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data -
 
-echo -e "${GREEN}✅ Queue worker configured${NC}"
+echo -e "${GREEN}✅ Queue worker and cron configured${NC}"
 
 # ============================================================================
 # STEP 17: Install Cloudflare Tunnel
@@ -512,14 +512,25 @@ dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || {
 }
 rm cloudflared-linux-amd64.deb
 
+# Uninstall any existing tunnel
 cloudflared service uninstall 2>/dev/null || true
-cloudflared service install "$CF_TOKEN"
 
+# Try systemd installation first
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl start cloudflared
-    systemctl enable cloudflared
-else
-    cloudflared tunnel run "$CF_TOKEN" > /var/log/cloudflared.log 2>&1 &
+    cloudflared service install "$CF_TOKEN" 2>/dev/null && {
+        systemctl start cloudflared 2>/dev/null || true
+        systemctl enable cloudflared 2>/dev/null || true
+        echo -e "${GREEN}✅ Cloudflare Tunnel installed as systemd service${NC}"
+    } || {
+        echo -e "${YELLOW}Systemd service failed, using manual start${NC}"
+        HAS_SYSTEMD=false
+    }
+fi
+
+if [ "$HAS_SYSTEMD" = false ]; then
+    # Manual start for containers
+    nohup cloudflared --pidfile /tmp/cloudflared.pid tunnel run --token "$CF_TOKEN" > /var/log/cloudflared.log 2>&1 &
+    echo -e "${GREEN}✅ Cloudflare Tunnel started manually${NC}"
 fi
 
 # ============================================================================
@@ -553,10 +564,10 @@ echo ""
 echo -e "${GREEN}4. Access Panel:${NC}"
 echo -e "   ${BLUE}https://${PANEL_DOMAIN}${NC}"
 echo ""
-echo -e "${YELLOW}Important:${NC}"
-echo -e "  - Panel runs on port ${BLUE}8443${NC} locally"
-echo -e "  - Cloudflare Tunnel maps 443 → 8443"
-echo -e "  - Users access via HTTPS on port 443"
+echo -e "${YELLOW}Service Status Check:${NC}"
+echo -e "   ${BLUE}ps aux | grep 'queue:work'${NC} (queue worker)"
+echo -e "   ${BLUE}ps aux | grep cloudflared${NC} (tunnel)"
+echo -e "   ${BLUE}tail -f /var/log/cloudflared.log${NC} (tunnel logs)"
 echo ""
 echo -e "${GREEN}All done!${NC}"
 echo ""
