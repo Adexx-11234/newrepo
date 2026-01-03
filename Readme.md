@@ -125,7 +125,7 @@ For user notifications and password resets:
 
 ```bash
 # Download the panel installation script
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/panel.sh -O panel.sh
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/panel.sh -O panel.sh
 
 # Make it executable
 chmod +x panel.sh
@@ -214,7 +214,7 @@ Additional application settings:
 
 ```bash
 # Download the wings installation script
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/wings.sh -O wings.sh
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/wings.sh -O wings.sh
 
 # Make it executable
 chmod +x wings.sh
@@ -786,7 +786,7 @@ To completely remove Pelican and start fresh:
 
 ```bash
 # Download uninstall script
-wget https://raw.githubusercontent.com/YOUR_REPO/uninstall.sh -O uninstall.sh
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/uninstall.sh -O uninstall.sh
 chmod +x uninstall.sh
 
 # Run uninstall
