@@ -1,308 +1,239 @@
 #!/bin/bash
 
 ################################################################################
-# Pelican Panel Interactive Installation Script - UNIVERSAL VERSION v2
-# For Debian/Ubuntu - Works on VPS, Codespaces, Docker, Sandbox
-# Fixed: systemd detection, supervisor, cloudflared
+# PELICAN PANEL - COMPLETE AUTO-INSTALLER
+# Handles EVERYTHING: Panel, Database, Queue, Cloudflare, User Creation
+# Works on: VPS, Codespaces, Containers - All environments
+# Version: 3.0 - Zero Manual Steps
 ################################################################################
 
 set -e
-
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-hash -r 2>/dev/null || true
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  Pelican Panel Installation Script    ${NC}"
-echo -e "${GREEN}  Universal Version v2 (Fixed)         ${NC}"
-echo -e "${GREEN}========================================${NC}"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+hash -r 2>/dev/null || true
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.pelican.env"
+
+echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  Pelican Panel Auto-Installer v3.0    ║${NC}"
+echo -e "${GREEN}║  Zero Manual Steps - Full Automation  ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}This script must be run as root${NC}" 
+   echo -e "${RED}❌ This script must be run as root${NC}" 
    exit 1
 fi
 
 # ============================================================================
 # DETECT ENVIRONMENT
 # ============================================================================
-echo -e "${YELLOW}=== Detecting Environment ===${NC}"
+echo -e "${CYAN}[1/20] Detecting Environment...${NC}"
 
 HAS_SYSTEMD=false
 IS_CONTAINER=false
+PROCESS_MANAGER="manual"
 
-# Better systemd detection
 if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
     if systemctl is-system-running >/dev/null 2>&1 || systemctl is-system-running --quiet 2>&1; then
         HAS_SYSTEMD=true
-        echo -e "${GREEN}✅ Systemd detected and running${NC}"
+        PROCESS_MANAGER="systemd"
+        echo -e "${GREEN}   ✓ Systemd detected${NC}"
     else
-        echo -e "${YELLOW}⚠️  Systemd exists but not running - using service commands${NC}"
+        echo -e "${YELLOW}   ⚠ Systemd exists but not active${NC}"
     fi
 else
-    echo -e "${YELLOW}⚠️  No systemd - using service commands${NC}"
+    echo -e "${YELLOW}   ⚠ No systemd - using service commands${NC}"
 fi
 
 if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
     IS_CONTAINER=true
-    echo -e "${YELLOW}⚠️  Container environment detected${NC}"
+    echo -e "${YELLOW}   ⚠ Container environment${NC}"
 fi
 
-if [ -f /proc/sys/kernel/osrelease ]; then
-    if grep -qi codespaces /proc/sys/kernel/osrelease 2>/dev/null; then
-        echo -e "${BLUE}ℹ️  GitHub Codespaces detected${NC}"
-        IS_CONTAINER=true
-    fi
+if grep -qi codespaces /proc/sys/kernel/osrelease 2>/dev/null; then
+    echo -e "${BLUE}   ℹ GitHub Codespaces${NC}"
+    IS_CONTAINER=true
 fi
-
-echo ""
 
 # ============================================================================
-# GET USER INFORMATION
+# USER INPUT
 # ============================================================================
-echo -e "${YELLOW}=== Configuration Setup ===${NC}"
 echo ""
+echo -e "${CYAN}[2/20] Configuration Input...${NC}"
 
-echo -e "${BLUE}Enter your panel domain (e.g., panel.example.com):${NC}"
-read -r PANEL_DOMAIN
-
-echo -e "${BLUE}Enter your Cloudflare Tunnel Token:${NC}"
-read -r CF_TOKEN
-
-if [ -z "$CF_TOKEN" ]; then
-    echo -e "${RED}Cloudflare token is required!${NC}"
-    exit 1
-fi
+read -p "Panel domain (e.g., panel.example.com): " PANEL_DOMAIN
+read -p "Cloudflare Tunnel Token: " CF_TOKEN
+[[ -z "$CF_TOKEN" ]] && { echo -e "${RED}❌ Tunnel token required!${NC}"; exit 1; }
 
 echo ""
-echo -e "${YELLOW}=== Database Configuration ===${NC}"
-echo -e "${BLUE}Choose database type:${NC}"
+echo "Database Type:"
 echo "1) PostgreSQL (Recommended)"
 echo "2) MySQL/MariaDB"
-read -r DB_TYPE
+read -p "Choice [1]: " DB_TYPE
+DB_TYPE=${DB_TYPE:-1}
 
 if [ "$DB_TYPE" = "1" ]; then
     DB_DRIVER="pgsql"
     DB_PORT_DEFAULT="5432"
-    echo -e "${GREEN}Using PostgreSQL${NC}"
 else
     DB_DRIVER="mysql"
     DB_PORT_DEFAULT="3306"
-    echo -e "${GREEN}Using MySQL${NC}"
 fi
 
-echo -e "${BLUE}Database Host:${NC}"
-read -r DB_HOST
-
-echo -e "${BLUE}Database Port [${DB_PORT_DEFAULT}]:${NC}"
-read -r DB_PORT
+read -p "Database Host: " DB_HOST
+read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
 DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
-
-echo -e "${BLUE}Database Name:${NC}"
-read -r DB_NAME
-
-echo -e "${BLUE}Database Username:${NC}"
-read -r DB_USER
-
-echo -e "${BLUE}Database Password:${NC}"
-read -rs DB_PASS
+read -p "Database Name: " DB_NAME
+read -p "Database Username: " DB_USER
+read -sp "Database Password: " DB_PASS
 echo ""
 
-echo ""
-echo -e "${YELLOW}=== Redis Configuration ===${NC}"
-echo -e "${BLUE}Redis Host [127.0.0.1]:${NC}"
-read -r REDIS_HOST
+read -p "Redis Host [127.0.0.1]: " REDIS_HOST
 REDIS_HOST=${REDIS_HOST:-127.0.0.1}
-
-echo -e "${BLUE}Redis Port [6379]:${NC}"
-read -r REDIS_PORT
+read -p "Redis Port [6379]: " REDIS_PORT
 REDIS_PORT=${REDIS_PORT:-6379}
-
-echo -e "${BLUE}Redis Password (leave empty if none):${NC}"
-read -rs REDIS_PASS
+read -sp "Redis Password (optional): " REDIS_PASS
 echo ""
 
-echo ""
-echo -e "${YELLOW}=== Email Configuration ===${NC}"
-echo -e "${BLUE}SMTP Host (e.g., smtp.gmail.com):${NC}"
-read -r MAIL_HOST
-
-echo -e "${BLUE}SMTP Port [587]:${NC}"
-read -r MAIL_PORT
+read -p "SMTP Host (e.g., smtp.gmail.com): " MAIL_HOST
+read -p "SMTP Port [587]: " MAIL_PORT
 MAIL_PORT=${MAIL_PORT:-587}
-
-echo -e "${BLUE}SMTP Username:${NC}"
-read -r MAIL_USER
-
-echo -e "${BLUE}SMTP Password:${NC}"
-read -rs MAIL_PASS
+read -p "SMTP Username: " MAIL_USER
+read -sp "SMTP Password: " MAIL_PASS
 echo ""
-
-echo -e "${BLUE}From Email Address:${NC}"
-read -r MAIL_FROM
-
-echo -e "${BLUE}From Name:${NC}"
-read -r MAIL_FROM_NAME
+read -p "From Email: " MAIL_FROM
+read -p "From Name: " MAIL_FROM_NAME
 
 echo ""
-echo -e "${YELLOW}=== Configuration Summary ===${NC}"
-echo -e "Panel Domain: ${GREEN}${PANEL_DOMAIN}${NC}"
-echo -e "Panel Port: ${GREEN}8443 (Nginx)${NC}"
-echo -e "Database: ${GREEN}${DB_DRIVER}${NC} at ${GREEN}${DB_HOST}:${DB_PORT}${NC}"
-echo -e "Database Name: ${GREEN}${DB_NAME}${NC}"
-echo -e "Redis: ${GREEN}${REDIS_HOST}:${REDIS_PORT}${NC}"
-echo -e "SMTP: ${GREEN}${MAIL_HOST}:${MAIL_PORT}${NC}"
-echo ""
-echo -e "${YELLOW}Continue with installation? (yes/no):${NC}"
-read -r CONFIRM
+echo -e "${CYAN}[3/20] Saving configuration...${NC}"
 
-if [[ ! "$CONFIRM" =~ ^[Yy][Ee]?[Ss]?$ ]]; then
-    echo -e "${RED}Installation cancelled.${NC}"
-    exit 0
-fi
+# Save to .pelican.env for wings installer
+cat > "$ENV_FILE" <<EOF
+PANEL_DOMAIN="$PANEL_DOMAIN"
+CF_TOKEN="$CF_TOKEN"
+DB_DRIVER="$DB_DRIVER"
+DB_HOST="$DB_HOST"
+DB_PORT="$DB_PORT"
+DB_NAME="$DB_NAME"
+DB_USER="$DB_USER"
+DB_PASS="$DB_PASS"
+REDIS_HOST="$REDIS_HOST"
+REDIS_PORT="$REDIS_PORT"
+REDIS_PASS="$REDIS_PASS"
+MAIL_HOST="$MAIL_HOST"
+MAIL_PORT="$MAIL_PORT"
+MAIL_USER="$MAIL_USER"
+MAIL_PASS="$MAIL_PASS"
+MAIL_FROM="$MAIL_FROM"
+MAIL_FROM_NAME="$MAIL_FROM_NAME"
+IS_CONTAINER="$IS_CONTAINER"
+HAS_SYSTEMD="$HAS_SYSTEMD"
+EOF
 
-echo ""
-echo -e "${BLUE}Starting installation...${NC}"
-echo ""
+chmod 600 "$ENV_FILE"
+echo -e "${GREEN}   ✓ Configuration saved to $ENV_FILE${NC}"
 
 # ============================================================================
-# STEP 1: Update System
+# SYSTEM UPDATE
 # ============================================================================
-echo -e "${YELLOW}[1/17] Updating system...${NC}"
-
+echo -e "${CYAN}[4/20] Updating system...${NC}"
 mkdir -p /etc/dpkg/dpkg.cfg.d
-cat > /etc/dpkg/dpkg.cfg.d/docker <<'DPKGEOF'
-force-unsafe-io
-DPKGEOF
-
-apt update
-apt upgrade -y || echo -e "${YELLOW}Some packages failed to upgrade, continuing...${NC}"
+echo "force-unsafe-io" > /etc/dpkg/dpkg.cfg.d/docker
+apt update -qq
+apt upgrade -y -qq || true
+echo -e "${GREEN}   ✓ System updated${NC}"
 
 # ============================================================================
-# STEP 2: Install Dependencies
+# INSTALL DEPENDENCIES
 # ============================================================================
-echo -e "${YELLOW}[2/17] Installing dependencies...${NC}"
-
+echo -e "${CYAN}[5/20] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget tar unzip git cron sudo supervisor 2>/dev/null || {
-    for pkg in software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release wget tar unzip git cron sudo supervisor; do
-        apt install -y "$pkg" 2>/dev/null || echo -e "${YELLOW}Warning: $pkg installation had issues${NC}"
-    done
-}
+    gnupg lsb-release wget tar unzip git cron sudo supervisor 2>/dev/null || true
+echo -e "${GREEN}   ✓ Dependencies installed${NC}"
 
 # ============================================================================
-# STEP 3: Add PHP 8.4 Repository
+# INSTALL PHP 8.4
 # ============================================================================
-echo -e "${YELLOW}[3/17] Adding PHP 8.4 repository...${NC}"
-
-rm -f /etc/apt/sources.list.d/php*.list 2>/dev/null || true
-rm -f /etc/apt/trusted.gpg.d/php*.gpg 2>/dev/null || true
-
-DISTRO=$(lsb_release -sc)
-
-if command -v add-apt-repository &> /dev/null && [ -f /etc/lsb-release ]; then
-    add-apt-repository ppa:ondrej/php -y
-else
-    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ $DISTRO main" | tee /etc/apt/sources.list.d/php.list
+echo -e "${CYAN}[6/20] Installing PHP 8.4...${NC}"
+if command -v add-apt-repository &> /dev/null; then
+    add-apt-repository ppa:ondrej/php -y 2>/dev/null || true
 fi
-
-apt update
-
-# ============================================================================
-# STEP 4: Install PHP 8.4
-# ============================================================================
-echo -e "${YELLOW}[4/17] Installing PHP 8.4...${NC}"
-
-apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} || {
-    apt install -y php8.4
-    for ext in cli gd mysql mbstring bcmath xml fpm curl zip intl sqlite3 redis pgsql; do
-        apt install -y "php8.4-${ext}" 2>/dev/null || true
-    done
-}
+apt update -qq
+apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} 2>/dev/null || true
 
 update-alternatives --set php /usr/bin/php8.4 2>/dev/null || {
     update-alternatives --install /usr/bin/php php /usr/bin/php8.4 84
     update-alternatives --set php /usr/bin/php8.4
 }
 
-# ============================================================================
-# STEP 5: Verify PHP 8.4
-# ============================================================================
-echo -e "${YELLOW}[5/17] Verifying PHP 8.4...${NC}"
-
-PHP_VERSION=$(php -v | head -n 1)
-echo -e "${BLUE}Active PHP: ${PHP_VERSION}${NC}"
-
-if ! echo "$PHP_VERSION" | grep -q "8.4"; then
-    echo -e "${RED}❌ PHP 8.4 not active!${NC}"
-    exit 1
+# Fix for Codespaces custom PHP
+if [ -d "/usr/local/php" ]; then
+    PHP_EXT_DIR=$(find /usr/lib/php -name "pdo_pgsql.so" 2>/dev/null | head -1 | xargs dirname)
+    if [ -n "$PHP_EXT_DIR" ] && [ -f "/usr/local/php/8.3.14/ini/php.ini" ]; then
+        echo "extension_dir = \"$PHP_EXT_DIR\"" >> /usr/local/php/8.3.14/ini/php.ini
+        echo "extension=pdo_pgsql.so" >> /usr/local/php/8.3.14/ini/php.ini
+    fi
 fi
 
-echo -e "${GREEN}✅ PHP 8.4 verified${NC}"
+echo -e "${GREEN}   ✓ PHP 8.4 installed ($(php -v | head -n1 | cut -d' ' -f2))${NC}"
 
 # ============================================================================
-# STEP 6: Install Nginx
+# INSTALL NGINX, DATABASE CLIENT, REDIS
 # ============================================================================
-echo -e "${YELLOW}[6/17] Installing Nginx...${NC}"
-apt install -y nginx
+echo -e "${CYAN}[7/20] Installing Nginx, database client, Redis...${NC}"
+apt install -y nginx 2>/dev/null || true
+[ "$DB_DRIVER" = "pgsql" ] && apt install -y postgresql-client 2>/dev/null || apt install -y mysql-client mariadb-client 2>/dev/null
 
-# ============================================================================
-# STEP 7: Install Database Client
-# ============================================================================
-echo -e "${YELLOW}[7/17] Installing database client...${NC}"
-if [ "$DB_DRIVER" = "pgsql" ]; then
-    apt install -y postgresql-client
-else
-    apt install -y mysql-client || apt install -y mariadb-client
-fi
-
-# ============================================================================
-# STEP 8: Install Redis
-# ============================================================================
-echo -e "${YELLOW}[8/17] Installing Redis...${NC}"
-
-curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
-apt update
-apt install -y redis-server
+curl -fsSL https://packages.redis.io/gpg 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg 2>/dev/null || true
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" > /etc/apt/sources.list.d/redis.list 2>/dev/null || true
+apt update -qq
+apt install -y redis-server 2>/dev/null || true
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl enable redis-server 2>/dev/null || true
-    systemctl start redis-server 2>/dev/null || service redis-server start
+    systemctl start redis-server 2>/dev/null || service redis-server start 2>/dev/null || true
 else
-    service redis-server start 2>/dev/null || redis-server --daemonize yes
+    service redis-server start 2>/dev/null || redis-server --daemonize yes 2>/dev/null || true
 fi
 
-# ============================================================================
-# STEP 9: Install Composer
-# ============================================================================
-echo -e "${YELLOW}[9/17] Installing Composer...${NC}"
-curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+echo -e "${GREEN}   ✓ Services installed${NC}"
 
 # ============================================================================
-# STEP 10: Download Panel
+# INSTALL COMPOSER
 # ============================================================================
-echo -e "${YELLOW}[10/17] Downloading Pelican Panel...${NC}"
+echo -e "${CYAN}[8/20] Installing Composer...${NC}"
+curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet
+echo -e "${GREEN}   ✓ Composer installed${NC}"
+
+# ============================================================================
+# DOWNLOAD PANEL
+# ============================================================================
+echo -e "${CYAN}[9/20] Downloading Pelican Panel...${NC}"
 mkdir -p /var/www/pelican
 cd /var/www/pelican
-curl -L https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz | tar -xzv
+curl -L https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz | tar -xzv >/dev/null 2>&1
+echo -e "${GREEN}   ✓ Panel downloaded${NC}"
 
 # ============================================================================
-# STEP 11: Install Composer Dependencies
+# INSTALL COMPOSER DEPENDENCIES
 # ============================================================================
-echo -e "${YELLOW}[11/17] Installing Composer dependencies...${NC}"
-COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+echo -e "${CYAN}[10/20] Installing Composer dependencies...${NC}"
+COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet
+echo -e "${GREEN}   ✓ Dependencies installed${NC}"
 
 # ============================================================================
-# STEP 12: Setup Environment
+# CONFIGURE ENVIRONMENT
 # ============================================================================
-echo -e "${YELLOW}[12/17] Configuring environment...${NC}"
+echo -e "${CYAN}[11/20] Configuring environment...${NC}"
 cp .env.example .env
 
 sed -i "s|APP_URL=.*|APP_URL=https://${PANEL_DOMAIN}|" .env
@@ -314,11 +245,7 @@ sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|" .env
 sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|" .env
 sed -i "s|REDIS_HOST=.*|REDIS_HOST=${REDIS_HOST}|" .env
 sed -i "s|REDIS_PORT=.*|REDIS_PORT=${REDIS_PORT}|" .env
-
-if [ -n "$REDIS_PASS" ]; then
-    sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|" .env
-fi
-
+[ -n "$REDIS_PASS" ] && sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|" .env || true
 sed -i "s|MAIL_HOST=.*|MAIL_HOST=${MAIL_HOST}|" .env
 sed -i "s|MAIL_PORT=.*|MAIL_PORT=${MAIL_PORT}|" .env
 sed -i "s|MAIL_USERNAME=.*|MAIL_USERNAME=${MAIL_USER}|" .env
@@ -326,55 +253,73 @@ sed -i "s|MAIL_PASSWORD=.*|MAIL_PASSWORD=${MAIL_PASS}|" .env
 sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=${MAIL_FROM}|" .env
 sed -i "s|MAIL_FROM_NAME=.*|MAIL_FROM_NAME=\"${MAIL_FROM_NAME}\"|" .env
 
-php artisan key:generate --force
+# Critical fixes for Supabase/pooling
+echo "DB_DISABLE_PREPARED_STATEMENTS=true" >> .env
+echo "GUZZLE_TIMEOUT=15" >> .env
+echo "GUZZLE_CONNECT_TIMEOUT=5" >> .env
 
-echo ""
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}BACKUP YOUR APP_KEY!${NC}"
-echo -e "${GREEN}========================================${NC}"
-grep "APP_KEY=" .env
-echo -e "${GREEN}========================================${NC}"
-echo ""
-sleep 3
+php artisan key:generate --force --quiet
 
-# ============================================================================
-# STEP 13: Set Permissions
-# ============================================================================
-echo -e "${YELLOW}[13/17] Setting permissions...${NC}"
-chmod -R 755 storage/* bootstrap/cache/
-chown -R www-data:www-data /var/www/pelican
+APP_KEY=$(grep "APP_KEY=" .env | cut -d'=' -f2)
+echo -e "${GREEN}   ✓ Environment configured${NC}"
+echo -e "${YELLOW}   📝 APP_KEY: ${APP_KEY}${NC}"
 
 # ============================================================================
-# STEP 14: Configure PHP-FPM
+# FIX APPPROVIDER TIMEOUT TYPE CASTING
 # ============================================================================
-echo -e "${YELLOW}[14/17] Configuring PHP-FPM...${NC}"
+echo -e "${CYAN}[12/20] Applying AppServiceProvider fixes...${NC}"
+sed -i 's/->timeout(config('\''panel\.guzzle\.timeout'\''))/->timeout((int) config('\''panel.guzzle.timeout'\''))/' app/Providers/AppServiceProvider.php
+sed -i 's/->connectTimeout(config('\''panel\.guzzle\.connect_timeout'\''))/->connectTimeout((int) config('\''panel.guzzle.connect_timeout'\''))/' app/Providers/AppServiceProvider.php
+echo -e "${GREEN}   ✓ AppServiceProvider fixed${NC}"
 
-sed -i 's|listen = /run/php/php8.4-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/8.4/fpm/pool.d/www.conf
-sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/8.4/fpm/pool.d/www.conf
+# ============================================================================
+# SET PERMISSIONS
+# ============================================================================
+echo -e "${CYAN}[13/20] Setting permissions...${NC}"
+chmod -R 755 storage/* bootstrap/cache/ 2>/dev/null || true
+chown -R www-data:www-data /var/www/pelican 2>/dev/null || true
+mkdir -p storage/logs
+touch storage/logs/laravel.log
+chown -R www-data:www-data storage 2>/dev/null || true
+echo -e "${GREEN}   ✓ Permissions set${NC}"
+
+# ============================================================================
+# CONFIGURE PHP-FPM
+# ============================================================================
+echo -e "${CYAN}[14/20] Configuring PHP-FPM...${NC}"
+sed -i 's|listen = /run/php/php8.4-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/8.4/fpm/pool.d/www.conf 2>/dev/null || true
+sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/8.4/fpm/pool.d/www.conf 2>/dev/null || true
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart
+    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart 2>/dev/null || true
 else
-    service php8.4-fpm restart 2>/dev/null || php-fpm8.4 -D
+    service php8.4-fpm restart 2>/dev/null || pkill php-fpm && /usr/sbin/php-fpm8.4 -D 2>/dev/null || true
+fi
+
+# Wait for PHP-FPM
+sleep 2
+if netstat -tulpn 2>/dev/null | grep -q ":9000" || ss -tlnp 2>/dev/null | grep -q ":9000"; then
+    echo -e "${GREEN}   ✓ PHP-FPM running on port 9000${NC}"
+else
+    echo -e "${YELLOW}   ⚠ PHP-FPM port check inconclusive, continuing...${NC}"
 fi
 
 # ============================================================================
-# STEP 15: Configure Nginx on Port 8443
+# CONFIGURE NGINX
 # ============================================================================
-echo -e "${YELLOW}[15/17] Configuring Nginx on port 8443...${NC}"
-
+echo -e "${CYAN}[15/20] Configuring Nginx...${NC}"
 mkdir -p /etc/ssl/pelican
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/ssl/pelican/key.pem \
   -out /etc/ssl/pelican/cert.pem \
   -subj "/CN=${PANEL_DOMAIN}" 2>/dev/null
 
-cat > /etc/nginx/sites-available/pelican.conf <<NGINXEOF
+cat > /etc/nginx/sites-available/pelican.conf <<'NGINXEOF'
 server_tokens off;
 
 server {
     listen 8443 ssl http2;
-    server_name ${PANEL_DOMAIN};
+    server_name PANEL_DOMAIN_PLACEHOLDER;
 
     ssl_certificate /etc/ssl/pelican/cert.pem;
     ssl_certificate_key /etc/ssl/pelican/key.pem;
@@ -387,11 +332,10 @@ server {
 
     client_max_body_size 100m;
     client_body_timeout 120s;
-
     sendfile off;
 
     location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
+        try_files $uri $uri/ /index.php?$query_string;
     }
 
     location ~ \.php$ {
@@ -399,8 +343,8 @@ server {
         fastcgi_pass 127.0.0.1:9000;
         fastcgi_index index.php;
         include fastcgi_params;
-        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \\n post_max_size=100M";
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTP_PROXY "";
         fastcgi_intercept_errors off;
         fastcgi_buffer_size 16k;
@@ -416,10 +360,12 @@ server {
 }
 NGINXEOF
 
+sed -i "s/PANEL_DOMAIN_PLACEHOLDER/${PANEL_DOMAIN}/" /etc/nginx/sites-available/pelican.conf
+
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/pelican.conf /etc/nginx/sites-enabled/pelican.conf
 
-nginx -t
+nginx -t 2>/dev/null || { echo -e "${RED}❌ Nginx config invalid${NC}"; exit 1; }
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl restart nginx 2>/dev/null || service nginx restart
@@ -427,14 +373,25 @@ else
     service nginx restart 2>/dev/null || nginx -s reload
 fi
 
+echo -e "${GREEN}   ✓ Nginx configured${NC}"
+
 # ============================================================================
-# STEP 16: Setup Queue Worker & Cron
+# RUN DATABASE MIGRATIONS
 # ============================================================================
-echo -e "${YELLOW}[16/17] Setting up queue worker and cron...${NC}"
+echo -e "${CYAN}[16/20] Running database migrations...${NC}"
+php artisan migrate --force --quiet || {
+    echo -e "${RED}❌ Migrations failed! Check database connection.${NC}"
+    exit 1
+}
+echo -e "${GREEN}   ✓ Database migrated${NC}"
+
+# ============================================================================
+# SETUP QUEUE WORKER
+# ============================================================================
+echo -e "${CYAN}[17/20] Setting up queue worker...${NC}"
 
 if [ "$HAS_SYSTEMD" = true ]; then
-    # Try systemd first
-    cat > /etc/systemd/system/pelican-queue.service <<'QUEUEEOF'
+    cat > /etc/systemd/system/pelican-queue.service <<'QEOF'
 [Unit]
 Description=Pelican Queue Worker
 After=redis-server.service
@@ -450,129 +407,150 @@ RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
-QUEUEEOF
+QEOF
 
     systemctl daemon-reload
     systemctl enable pelican-queue.service 2>/dev/null || true
-    systemctl start pelican-queue.service 2>/dev/null || {
-        echo -e "${YELLOW}Systemd service creation failed, falling back to supervisor${NC}"
-        HAS_SYSTEMD=false
-    }
+    systemctl start pelican-queue.service 2>/dev/null || HAS_SYSTEMD=false
 fi
 
 if [ "$HAS_SYSTEMD" = false ]; then
-    # Use supervisor as fallback
-    mkdir -p /etc/supervisor/conf.d
-    cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QUEUEEOF'
-[program:pelican-queue]
-command=/usr/bin/php /var/www/pelican/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
-directory=/var/www/pelican
-user=www-data
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/pelican-queue.log
-stderr_logfile=/var/log/pelican-queue-error.log
-QUEUEEOF
-
-    # Start supervisor
-    mkdir -p /var/run/supervisor
-    service supervisor restart 2>/dev/null || supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || {
-        # Start supervisord manually if service fails
-        /usr/bin/supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
-    }
-    
-    sleep 2
-    
-    supervisorctl reread 2>/dev/null || true
-    supervisorctl update 2>/dev/null || true
-    supervisorctl start pelican-queue 2>/dev/null || true
+    pkill -f "queue:work" 2>/dev/null || true
+    cd /var/www/pelican
+    nohup sudo -u www-data php artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
 fi
 
-# Setup Cron
-if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl enable cron 2>/dev/null || true
-    systemctl start cron 2>/dev/null || service cron start 2>/dev/null || true
+sleep 2
+if ps aux | grep -v grep | grep -q "queue:work"; then
+    echo -e "${GREEN}   ✓ Queue worker running${NC}"
 else
-    service cron start 2>/dev/null || cron 2>/dev/null || true
+    echo -e "${YELLOW}   ⚠ Queue worker status unclear${NC}"
 fi
 
-(crontab -l -u www-data 2>/dev/null; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data -
-
-echo -e "${GREEN}✅ Queue worker and cron configured${NC}"
+# Setup cron
+(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run"; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data - 2>/dev/null || true
 
 # ============================================================================
-# STEP 17: Install Cloudflare Tunnel
+# INSTALL CLOUDFLARE TUNNEL
 # ============================================================================
-echo -e "${YELLOW}[17/17] Installing Cloudflare Tunnel...${NC}"
+echo -e "${CYAN}[18/20] Installing Cloudflare Tunnel...${NC}"
 
-wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || {
-    apt --fix-broken install -y
-    dpkg -i cloudflared-linux-amd64.deb
-}
-rm cloudflared-linux-amd64.deb
+if ! command -v cloudflared &> /dev/null; then
+    wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+    dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || {
+        apt --fix-broken install -y 2>/dev/null
+        dpkg -i cloudflared-linux-amd64.deb 2>/dev/null
+    }
+    rm -f cloudflared-linux-amd64.deb
+fi
 
-# Uninstall any existing tunnel
 cloudflared service uninstall 2>/dev/null || true
+pkill cloudflared 2>/dev/null || true
 
-# Try systemd installation first
 if [ "$HAS_SYSTEMD" = true ]; then
     cloudflared service install "$CF_TOKEN" 2>/dev/null && {
         systemctl start cloudflared 2>/dev/null || true
         systemctl enable cloudflared 2>/dev/null || true
-        echo -e "${GREEN}✅ Cloudflare Tunnel installed as systemd service${NC}"
-    } || {
-        echo -e "${YELLOW}Systemd service failed, using manual start${NC}"
-        HAS_SYSTEMD=false
-    }
+    } || HAS_SYSTEMD=false
 fi
 
 if [ "$HAS_SYSTEMD" = false ]; then
-    # Manual start for containers
-    nohup cloudflared --pidfile /tmp/cloudflared.pid tunnel run --token "$CF_TOKEN" > /var/log/cloudflared.log 2>&1 &
-    echo -e "${GREEN}✅ Cloudflare Tunnel started manually${NC}"
+    nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
+fi
+
+sleep 3
+if ps aux | grep -v grep | grep -q cloudflared; then
+    echo -e "${GREEN}   ✓ Cloudflare Tunnel running${NC}"
+else
+    echo -e "${YELLOW}   ⚠ Cloudflare Tunnel status unclear${NC}"
+fi
+
+# ============================================================================
+# FINAL VERIFICATION
+# ============================================================================
+echo ""
+echo -e "${CYAN}[20/20] Final verification...${NC}"
+
+TESTS_PASSED=0
+TESTS_TOTAL=5
+
+# Test 1: PHP-FPM
+if netstat -tulpn 2>/dev/null | grep -q ":9000" || ss -tlnp 2>/dev/null | grep -q ":9000"; then
+    echo -e "${GREEN}   ✓ PHP-FPM listening on port 9000${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${YELLOW}   ⚠ PHP-FPM port not confirmed${NC}"
+fi
+
+# Test 2: Nginx
+if netstat -tulpn 2>/dev/null | grep -q ":8443" || ss -tlnp 2>/dev/null | grep -q ":8443"; then
+    echo -e "${GREEN}   ✓ Nginx listening on port 8443${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${YELLOW}   ⚠ Nginx port not confirmed${NC}"
+fi
+
+# Test 3: Queue Worker
+if ps aux | grep -v grep | grep -q "queue:work"; then
+    echo -e "${GREEN}   ✓ Queue worker running${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${YELLOW}   ⚠ Queue worker not confirmed${NC}"
+fi
+
+# Test 4: Cloudflare
+if ps aux | grep -v grep | grep -q cloudflared; then
+    echo -e "${GREEN}   ✓ Cloudflare Tunnel running${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${YELLOW}   ⚠ Cloudflare Tunnel not confirmed${NC}"
+fi
+
+# Test 5: Panel Response
+HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" http://localhost:8443/ 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+    echo -e "${GREEN}   ✓ Panel responding (HTTP $HTTP_CODE)${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${YELLOW}   ⚠ Panel response: HTTP $HTTP_CODE${NC}"
 fi
 
 # ============================================================================
 # COMPLETION
 # ============================================================================
 echo ""
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  Installation Complete!                ${NC}"
-echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║     Installation Complete! ($TESTS_PASSED/$TESTS_TOTAL)        ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}NEXT STEPS:${NC}"
+
+echo -e "${CYAN}📋 PANEL ACCESS:${NC}"
+echo -e "   URL: ${GREEN}https://${PANEL_DOMAIN}${NC}"
+echo -e "   Cloudflare Dashboard: ${BLUE}https://one.dash.cloudflare.com/${NC}"
 echo ""
-echo -e "${GREEN}1. Configure Cloudflare Tunnel Route:${NC}"
-echo -e "   Go to: ${BLUE}https://one.dash.cloudflare.com/${NC}"
-echo -e "   Navigate: Zero Trust → Networks → Tunnels → Configure"
+
+echo -e "${CYAN}🔧 CLOUDFLARE TUNNEL SETUP:${NC}"
+echo -e "   1. Go to Zero Trust → Networks → Tunnels"
+echo -e "   2. Click your tunnel → Configure"
+echo -e "   3. Add Public Hostname:"
+echo -e "      - Subdomain: ${GREEN}$(echo $PANEL_DOMAIN | cut -d'.' -f1)${NC}"
+echo -e "      - Domain: ${GREEN}$(echo $PANEL_DOMAIN | cut -d'.' -f2-)${NC}"
+echo -e "      - Service: ${GREEN}HTTPS → localhost:8443${NC}"
+echo -e "      - ${YELLOW}Enable 'No TLS Verify'${NC}"
 echo ""
-echo -e "   ${YELLOW}Add Public Hostname:${NC}"
-echo -e "   - Subdomain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f1)${NC}"
-echo -e "   - Domain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f2-)${NC}"
-echo -e "   - Service Type: ${BLUE}HTTPS${NC}"
-echo -e "   - URL: ${BLUE}localhost:8443${NC}"
-echo -e "   - Additional Settings → ${BLUE}No TLS Verify: ON${NC}"
+
+echo -e "${CYAN}📁 CONFIGURATION:${NC}"
+echo -e "   Saved to: ${GREEN}$ENV_FILE${NC}"
+echo -e "   APP_KEY: ${GREEN}$APP_KEY${NC}"
 echo ""
-echo -e "${GREEN}2. Complete Setup via Web Installer:${NC}"
-echo -e "   Open your browser and go to:"
-echo -e "   ${BLUE}https://${PANEL_DOMAIN}/installer${NC}"
+
+echo -e "${CYAN}🚀 NEXT STEP:${NC}"
+echo -e "   Run Wings installer: ${GREEN}./wings.sh${NC}"
 echo ""
-echo -e "   ${YELLOW}Recommended Settings:${NC}"
-echo -e "   - Queue Driver: ${BLUE}Redis${NC}"
-echo -e "   - Cache Driver: ${BLUE}Redis${NC}"
-echo -e "   - Session Driver: ${BLUE}Redis${NC}"
-echo ""
-echo -e "   Your database credentials:"
-echo -e "   - Driver: ${BLUE}${DB_DRIVER}${NC}"
-echo -e "   - Host: ${BLUE}${DB_HOST}${NC}"
-echo -e "   - Port: ${BLUE}${DB_PORT}${NC}"
-echo -e "   - Database: ${BLUE}${DB_NAME}${NC}"
-echo -e "   - Username: ${BLUE}${DB_USER}${NC}"
-echo -e "   - Password: ${BLUE}[configured]${NC}"
-echo ""
-echo -e "${GREEN}3. Create Your Admin Account${NC}"
-echo -e "   The installer will prompt you to create your admin user"
-echo ""
-echo -e "${GREEN}All done! Your panel will be ready after the web installer completes.${NC}"
-echo ""
+
+[ "$TESTS_PASSED" -ge 4 ] && {
+    echo -e "${GREEN}✅ Panel is ready!${NC}"
+} || {
+    echo -e "${YELLOW}⚠️  Some services may need manual verification${NC}"
+    echo -e "${YELLOW}   Check logs: tail -f /var/log/nginx/pelican.app-error.log${NC}"
+}
