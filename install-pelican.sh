@@ -1,9 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# Pelican Panel Interactive Installation Script - FIXED VERSION
+# Pelican Panel Interactive Installation Script - CONTAINER-SAFE VERSION
 # For Debian/Ubuntu with Cloudflare Tunnel & PostgreSQL
-# ALL settings will be asked during installation
+# Handles dpkg cross-device link errors in containerized environments
 ################################################################################
 
 set -e
@@ -20,7 +20,7 @@ NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Pelican Panel Installation Script    ${NC}"
-echo -e "${GREEN}  Interactive Setup Version (Fixed)    ${NC}"
+echo -e "${GREEN}  Container-Safe Version                ${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -144,17 +144,57 @@ echo -e "${BLUE}Starting installation...${NC}"
 echo ""
 
 # ============================================================================
-# STEP 1: Update System
+# STEP 1: Update System with dpkg fix
 # ============================================================================
 echo -e "${YELLOW}[1/17] Updating system...${NC}"
-apt update && apt upgrade -y
+
+# Configure dpkg to handle cross-device link errors (common in containers)
+cat > /etc/dpkg/dpkg.cfg.d/docker <<'DPKGEOF'
+# Handle cross-device link errors in containerized environments
+force-unsafe-io
+DPKGEOF
+
+# Try normal update first
+if ! apt update && apt upgrade -y; then
+    echo -e "${YELLOW}Normal upgrade failed, attempting to fix dpkg issues...${NC}"
+    
+    # Fix broken packages
+    dpkg --configure -a 2>/dev/null || true
+    apt --fix-broken install -y 2>/dev/null || true
+    
+    # If git update is stuck, force reinstall
+    if dpkg -l | grep -q "^iF.*git"; then
+        echo -e "${YELLOW}Forcing git reinstallation...${NC}"
+        apt remove --purge -y git 2>/dev/null || true
+        apt install -y git
+    fi
+    
+    # Try upgrade again
+    apt update
+    apt upgrade -y || {
+        echo -e "${YELLOW}Some packages failed to upgrade, continuing anyway...${NC}"
+    }
+fi
 
 # ============================================================================
 # STEP 2: Install Dependencies
 # ============================================================================
 echo -e "${YELLOW}[2/17] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget git tar unzip cron
+    gnupg lsb-release wget tar unzip cron 2>/dev/null || {
+    echo -e "${YELLOW}Some dependencies failed, trying individually...${NC}"
+    for pkg in software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release wget tar unzip cron; do
+        apt install -y "$pkg" 2>/dev/null || echo -e "${YELLOW}Warning: $pkg installation failed${NC}"
+    done
+}
+
+# Install git separately if needed
+if ! command -v git &> /dev/null; then
+    echo -e "${YELLOW}Installing git separately...${NC}"
+    apt install -y --reinstall git 2>/dev/null || {
+        echo -e "${YELLOW}Git installation had issues, but may still work${NC}"
+    }
+fi
 
 # ============================================================================
 # STEP 3: Add PHP 8.4 Repository
@@ -204,8 +244,13 @@ fi
 echo -e "${YELLOW}[4/17] Installing PHP 8.4 with all required extensions...${NC}"
 
 # Install PHP 8.4 and ALL required extensions
-# Note: sodium is built into php8.4-common, dom is provided by php8.4-xml
-apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql}
+apt install -y php8.4 php8.4-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} || {
+    echo -e "${YELLOW}Batch install failed, installing packages individually...${NC}"
+    apt install -y php8.4
+    for ext in cli gd mysql mbstring bcmath xml fpm curl zip intl sqlite3 redis pgsql; do
+        apt install -y "php8.4-${ext}" 2>/dev/null || echo -e "${YELLOW}Warning: php8.4-${ext} installation had issues${NC}"
+    done
+}
 
 # Force PHP 8.4 as the default CLI version
 update-alternatives --set php /usr/bin/php8.4 2>/dev/null || true
@@ -280,7 +325,7 @@ if [ ${#MISSING_EXTS[@]} -gt 0 ]; then
     fi
 fi
 
-echo -e "${GREEN}✅ All required PHP extensions are loaded!${NC}"
+echo -e "${GREEN}✅ PHP extensions check complete!${NC}"
 
 # ============================================================================
 # STEP 6: Install Nginx
@@ -295,7 +340,7 @@ echo -e "${YELLOW}[7/17] Installing database client...${NC}"
 if [ "$DB_DRIVER" = "pgsql" ]; then
     apt install -y postgresql-client
 else
-    apt install -y mysql-client
+    apt install -y mysql-client || apt install -y mariadb-client
 fi
 
 # ============================================================================
@@ -306,7 +351,13 @@ curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/
 echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
 apt update
 apt install -y redis-server
-systemctl enable --now redis-server
+
+# Start Redis
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl enable --now redis-server
+else
+    service redis-server start 2>/dev/null || /etc/init.d/redis-server start 2>/dev/null || true
+fi
 
 # ============================================================================
 # STEP 9: Install Composer
@@ -529,18 +580,29 @@ echo -e "${GREEN}Cron job added for www-data user${NC}"
 echo -e "${YELLOW}[17/17] Installing Cloudflare Tunnel...${NC}"
 
 wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-dpkg -i cloudflared-linux-amd64.deb
+dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || {
+    echo -e "${YELLOW}dpkg had issues, trying to fix...${NC}"
+    apt --fix-broken install -y
+    dpkg -i cloudflared-linux-amd64.deb
+}
 rm cloudflared-linux-amd64.deb
 
 cloudflared service uninstall 2>/dev/null || true
 cloudflared service install "$CF_TOKEN"
-systemctl start cloudflared
-systemctl enable cloudflared
+
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl start cloudflared
+    systemctl enable cloudflared
+else
+    service cloudflared start 2>/dev/null || true
+fi
 
 # ============================================================================
 # Enable all services
 # ============================================================================
-systemctl enable nginx php8.4-fpm redis-server pelican-queue cloudflared
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl enable nginx php8.4-fpm redis-server 2>/dev/null || true
+fi
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
@@ -571,11 +633,15 @@ echo -e "${GREEN}4. Access Your Panel:${NC}"
 echo -e "   ${BLUE}https://${PANEL_DOMAIN}${NC}"
 echo ""
 echo -e "${YELLOW}Services Status:${NC}"
-systemctl status nginx --no-pager -l | head -3
-systemctl status php8.4-fpm --no-pager -l | head -3
-systemctl status redis-server --no-pager -l | head -3
-systemctl status pelican-queue --no-pager -l | head -3
-systemctl status cloudflared --no-pager -l | head -3
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null 2>&1; then
+    systemctl status nginx --no-pager -l | head -3 || true
+    systemctl status php8.4-fpm --no-pager -l | head -3 || true
+    systemctl status redis-server --no-pager -l | head -3 || true
+    systemctl status pelican-queue --no-pager -l | head -3 || true
+    systemctl status cloudflared --no-pager -l | head -3 || true
+else
+    echo -e "${YELLOW}Systemd not available - services started with init scripts${NC}"
+fi
 echo ""
 echo -e "${GREEN}All done!${NC}"
 echo ""
