@@ -125,16 +125,16 @@ For user notifications and password resets:
 
 ```bash
 # Download the panel installation script
-wget https://raw.githubusercontent.com/YOUR_REPO/panel-install.sh -O panel-install.sh
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/panel.sh -O panel.sh
 
 # Make it executable
-chmod +x panel-install.sh
+chmod +x panel.sh
 ```
 
 ### Step 2: Run Installation
 
 ```bash
-sudo ./panel-install.sh
+sudo ./panel.sh
 ```
 
 ### Step 3: Answer the Prompts
@@ -214,16 +214,16 @@ Additional application settings:
 
 ```bash
 # Download the wings installation script
-wget https://raw.githubusercontent.com/YOUR_REPO/wings-install.sh -O wings-install.sh
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/wings.sh -O wings.sh
 
 # Make it executable
-chmod +x wings-install.sh
+chmod +x wings.sh
 ```
 
 ### Step 2: Run Installation
 
 ```bash
-sudo ./wings-install.sh
+sudo ./wings.sh
 ```
 
 ### Step 3: Answer the Prompts
