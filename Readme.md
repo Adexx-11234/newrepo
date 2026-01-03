@@ -228,18 +228,32 @@ sudo ./wings-install.sh
 
 ### Step 3: Answer the Prompts
 
+The script will ask for:
+
 ```
 Node domain: node-1.example.com
+Panel URL: https://panel.example.com
+Panel API Token: papp_xxxxxxxxxxxx
+Node ID: 1 (usually 1 for first node)
 SSL Certificate Setup: 1 (Self-signed - recommended)
-Continue: yes
 ```
 
-The script will:
-- ✅ Detect your environment (VM or container)
-- ✅ Install Docker with appropriate configuration
-- ✅ Download Wings binary
+**Where to get the Panel Token:**
+1. Login to your Panel: `https://panel.example.com`
+2. Go to: **Admin** → **Nodes** → Click your node
+3. Click **Configuration** tab
+4. Look for the auto-config command - copy the token that starts with `papp_`
+
+The script will automatically:
+- ✅ Install and configure Docker
+- ✅ Download Wings
 - ✅ Create SSL certificates
-- ✅ Set up directories
+- ✅ Run `wings configure` command
+- ✅ **Automatically fix IPv6 for containers** (no manual editing!)
+- ✅ Apply all necessary configuration fixes
+- ✅ Create systemd service (if available)
+
+### Step 4: Verify Configuration
 
 ---
 
