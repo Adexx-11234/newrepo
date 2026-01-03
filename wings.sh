@@ -63,6 +63,19 @@ echo -e "${BLUE}Node domain (e.g., node-1.example.com):${NC}"
 read -r NODE_DOMAIN
 
 echo ""
+echo -e "${BLUE}Panel URL (e.g., https://panel.example.com):${NC}"
+read -r PANEL_URL
+
+echo ""
+echo -e "${BLUE}Panel API Token (starts with papp_):${NC}"
+read -r PANEL_TOKEN
+
+echo ""
+echo -e "${BLUE}Node ID (usually 1 for first node):${NC}"
+read -r NODE_ID
+NODE_ID=${NODE_ID:-1}
+
+echo ""
 echo -e "${YELLOW}SSL Certificate Setup:${NC}"
 echo "1) Self-signed (recommended for Cloudflare Tunnel)"
 echo "2) Let's Encrypt (production VPS only - requires DNS + port 80)"
@@ -77,6 +90,12 @@ if [ "$IS_CONTAINER" = true ] && [ "$SSL_CHOICE" = "2" ]; then
     [[ ! "$CONTINUE" =~ ^[Yy] ]] && { echo -e "${RED}Cancelled${NC}"; exit 0; }
 fi
 
+echo ""
+echo -e "${YELLOW}=== Configuration Summary ===${NC}"
+echo -e "Node Domain: ${GREEN}${NODE_DOMAIN}${NC}"
+echo -e "Panel URL: ${GREEN}${PANEL_URL}${NC}"
+echo -e "Node ID: ${GREEN}${NODE_ID}${NC}"
+echo -e "SSL: ${GREEN}Option ${SSL_CHOICE}${NC}"
 echo ""
 echo -e "${YELLOW}Continue with installation? (yes/no):${NC}"
 read -r CONFIRM
@@ -328,10 +347,76 @@ else
 fi
 
 # ============================================================================
-# STEP 10: Create Wings Service
+# STEP 10: Configure Wings Automatically
 # ============================================================================
-echo -e "${YELLOW}[10/10] Setting up Wings service...${NC}"
+echo -e "${YELLOW}[10/11] Configuring Wings with Panel...${NC}"
 
+# Run wings configure command
+echo -e "${BLUE}Running: wings configure --panel-url ${PANEL_URL} --token [HIDDEN] --node ${NODE_ID}${NC}"
+
+if wings configure --panel-url "${PANEL_URL}" --token "${PANEL_TOKEN}" --node "${NODE_ID}"; then
+    echo -e "${GREEN}✅ Wings configured successfully${NC}"
+else
+    echo -e "${RED}❌ Wings configuration failed!${NC}"
+    echo -e "${YELLOW}Please check your Panel URL and token${NC}"
+    exit 1
+fi
+
+# ============================================================================
+# STEP 11: Auto-Fix Configuration for Containers
+# ============================================================================
+echo -e "${YELLOW}[11/11] Applying environment-specific fixes...${NC}"
+
+if [ "$IS_CONTAINER" = true ]; then
+    echo -e "${BLUE}Applying container-specific configuration fixes...${NC}"
+    
+    # Backup original config
+    cp /etc/pelican/config.yml /etc/pelican/config.yml.backup
+    
+    # Fix IPv6 setting
+    sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
+    
+    # Comment out v6 section
+    sed -i '/^[[:space:]]*v6:/,/^[[:space:]]*gateway:.*$/s/^/#/' /etc/pelican/config.yml
+    
+    echo -e "${GREEN}✅ Container-specific fixes applied${NC}"
+    echo -e "${BLUE}   - IPv6 disabled${NC}"
+    echo -e "${BLUE}   - v6 network section commented out${NC}"
+    echo -e "${YELLOW}   - Original config backed up to: /etc/pelican/config.yml.backup${NC}"
+else
+    echo -e "${GREEN}✅ No environment-specific fixes needed${NC}"
+fi
+
+# Verify critical settings
+echo -e "${BLUE}Verifying configuration...${NC}"
+
+if grep -q "IPv6: false" /etc/pelican/config.yml || [ "$IS_CONTAINER" = false ]; then
+    echo -e "${GREEN}✅ IPv6 configuration correct${NC}"
+else
+    echo -e "${RED}⚠️  IPv6 setting may need manual verification${NC}"
+fi
+
+if grep -q "port: 8080" /etc/pelican/config.yml; then
+    echo -e "${GREEN}✅ Port configuration correct (8080)${NC}"
+else
+    echo -e "${YELLOW}⚠️  Port setting may need verification${NC}"
+fi
+
+echo -e "${GREEN}✅ Configuration complete!${NC}"
+
+# ============================================================================
+# COMPLETION
+# ============================================================================
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}  Wings Installation Complete!          ${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+
+echo -e "${YELLOW}CRITICAL NEXT STEPS:${NC}"
+echo ""
+
+echo -e "${GREEN}1. Create Wings Service (if systemd available):${NC}"
 if [ "$HAS_SYSTEMD" = true ]; then
     cat > /etc/systemd/system/wings.service <<'WEOF'
 [Unit]
@@ -354,57 +439,14 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 WEOF
-
     systemctl daemon-reload
-    echo -e "${GREEN}✅ Wings systemd service created${NC}"
+    echo -e "${GREEN}   ✅ Wings systemd service created${NC}"
 else
-    echo -e "${YELLOW}⚠️  No systemd - you'll use manual start commands${NC}"
+    echo -e "${YELLOW}   ⚠️  Systemd not available - use manual commands below${NC}"
 fi
-
-# ============================================================================
-# COMPLETION
-# ============================================================================
-echo ""
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  Wings Installation Complete!          ${NC}"
-echo -e "${GREEN}========================================${NC}"
 echo ""
 
-echo -e "${YELLOW}CRITICAL NEXT STEPS:${NC}"
-echo ""
-
-echo -e "${GREEN}1. Get Configuration from Panel:${NC}"
-echo -e "   - Login to your Pelican Panel"
-echo -e "   - Go to: ${BLUE}Admin → Nodes → [Your Node]${NC}"
-echo -e "   - Click ${BLUE}Configuration${NC} tab"
-echo -e "   - Copy the auto-configuration command"
-echo ""
-
-echo -e "${GREEN}2. Configure Wings:${NC}"
-echo -e "   ${BLUE}sudo wings configure --panel-url https://YOUR_PANEL_URL --token YOUR_TOKEN --node 1${NC}"
-echo ""
-
-if [ "$IS_CONTAINER" = true ]; then
-    echo -e "${RED}⚠️  CRITICAL FOR CONTAINERS (Codespaces/Docker/Sandbox):${NC}"
-    echo -e "${YELLOW}After running the configure command above, you MUST edit the config:${NC}"
-    echo -e "   ${BLUE}sudo nano /etc/pelican/config.yml${NC}"
-    echo ""
-    echo -e "${YELLOW}Find and change these settings:${NC}"
-    echo -e "   ${RED}IPv6: true${NC}  ${GREEN}→${NC}  ${GREEN}IPv6: false${NC}"
-    echo ""
-    echo -e "${YELLOW}Remove or comment out the entire v6 section:${NC}"
-    echo -e "   ${RED}v6:${NC}"
-    echo -e "   ${RED}  subnet: fdba:17c8:6c94::/64${NC}"
-    echo -e "   ${RED}  gateway: fdba:17c8:6c94::1011${NC}"
-    echo ""
-    echo -e "${YELLOW}Change to:${NC}"
-    echo -e "   ${GREEN}# v6:${NC}"
-    echo -e "   ${GREEN}#   subnet: fdba:17c8:6c94::/64${NC}"
-    echo -e "   ${GREEN}#   gateway: fdba:17c8:6c94::1011${NC}"
-    echo ""
-fi
-
-echo -e "${GREEN}3. Configure Cloudflare Tunnel:${NC}"
+echo -e "${GREEN}2. Configure Cloudflare Tunnel:${NC}"
 echo -e "   Go to: ${BLUE}https://one.dash.cloudflare.com/${NC}"
 echo -e "   Navigate: ${BLUE}Zero Trust → Networks → Tunnels → Configure${NC}"
 echo -e "   Add Public Hostname:"
@@ -414,4 +456,80 @@ echo -e "   - Type: ${BLUE}HTTPS${NC}"
 echo -e "   - URL: ${BLUE}localhost:8080${NC}"
 echo -e "   - ${YELLOW}Enable 'No TLS Verify' in Additional settings${NC}"
 echo ""
-echo -e "   ${GREEN}Install Cloudflared on this
+echo -e "   ${GREEN}Install Cloudflared on this server:${NC}"
+echo -e "   ${BLUE}wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb${NC}"
+echo -e "   ${BLUE}sudo dpkg -i cloudflared-linux-amd64.deb${NC}"
+echo -e "   ${BLUE}sudo cloudflared service install YOUR_TUNNEL_TOKEN${NC}"
+if [ "$HAS_SYSTEMD" = true ]; then
+    echo -e "   ${BLUE}sudo systemctl start cloudflared${NC}"
+else
+    echo -e "   ${BLUE}sudo cloudflared tunnel run YOUR_TUNNEL_TOKEN &${NC}"
+fi
+echo ""
+
+echo -e "${GREEN}3. Update Panel Node Settings:${NC}"
+echo -e "   In Panel: Admin → Nodes → Edit your node"
+echo -e "   - FQDN: ${BLUE}${NODE_DOMAIN}${NC}"
+echo -e "   - Daemon Port: ${BLUE}443${NC}"
+echo -e "   - Behind Proxy: ${BLUE}YES${NC}"
+echo -e "   - Scheme: ${BLUE}https${NC}"
+echo ""
+
+echo -e "${GREEN}4. Start Wings:${NC}"
+if [ "$HAS_SYSTEMD" = true ]; then
+    echo -e "   ${BLUE}sudo systemctl enable --now wings${NC}"
+    echo ""
+    echo -e "${GREEN}5. Monitor Wings:${NC}"
+    echo -e "   ${BLUE}sudo systemctl status wings${NC}"
+    echo -e "   ${BLUE}sudo journalctl -u wings -f${NC}"
+else
+    echo -e "   ${BLUE}sudo nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &${NC}"
+    echo ""
+    echo -e "${GREEN}5. Monitor Wings:${NC}"
+    echo -e "   ${BLUE}ps aux | grep wings${NC}"
+    echo -e "   ${BLUE}tail -f /var/log/pelican/wings.log${NC}"
+    echo -e "   ${BLUE}tail -f /tmp/wings.log${NC}"
+fi
+echo ""
+
+echo -e "${GREEN}6. Test Connection:${NC}"
+echo -e "   ${BLUE}curl -k https://localhost:8080/api/system${NC}"
+echo -e "   ${BLUE}curl https://${NODE_DOMAIN}/api/system${NC}"
+echo -e "   ${YELLOW}Both should return: \"error\":\"The required authorization heads...\"${NC}"
+echo -e "   ${GREEN}(This auth error is expected and means Wings is working!)${NC}"
+echo ""
+
+echo -e "${YELLOW}Environment Summary:${NC}"
+echo ""
+echo -e "${BLUE}Environment Type:${NC}"
+[ "$IS_CONTAINER" = true ] && echo -e "  ${YELLOW}Container (requires IPv6: false in config)${NC}" || echo -e "  ${GREEN}VM/Bare Metal${NC}"
+echo ""
+echo -e "${BLUE}Process Manager:${NC}"
+[ "$HAS_SYSTEMD" = true ] && echo -e "  ${GREEN}systemd${NC}" || echo -e "  ${YELLOW}manual (use nohup)${NC}"
+echo ""
+echo -e "${BLUE}Docker:${NC} $(docker --version 2>/dev/null || echo 'Not found')"
+docker ps >/dev/null 2>&1 && echo -e "  ${GREEN}● Running${NC}" || echo -e "  ${RED}● Stopped${NC}"
+echo ""
+echo -e "${BLUE}SSL Certificates:${NC}"
+ls -lh /etc/letsencrypt/live/${NODE_DOMAIN}/ 2>/dev/null || echo "  Not configured"
+echo ""
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Installation Complete!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+
+if [ "$IS_CONTAINER" = true ]; then
+    echo -e "${GREEN}✅ Container environment detected and configured automatically${NC}"
+    echo -e "${GREEN}   - IPv6 disabled${NC}"
+    echo -e "${GREEN}   - Docker network optimized${NC}"
+    echo -e "${GREEN}   - Configuration backup saved${NC}"
+    echo ""
+fi
+
+echo -e "${BLUE}Next Steps:${NC}"
+echo -e "  1. Install Cloudflare Tunnel (see instructions above)"
+echo -e "  2. Update Panel node settings"
+echo -e "  3. Start Wings"
+echo -e "  4. Check node health in Panel (should show green heart)"
+echo ""
