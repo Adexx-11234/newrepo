@@ -180,32 +180,79 @@ echo -e "${GREEN}   ✓ Dependencies installed${NC}"
 # ============================================================================
 echo -e "${CYAN}[5/21] Installing PHP 8.3+...${NC}"
 
-# Try package manager first
-if command -v add-apt-repository &> /dev/null; then
-    add-apt-repository ppa:ondrej/php -y 2>&1 | grep -v "GPG error" || true
-fi
-apt update -qq 2>&1 | grep -v "GPG error" || true
-
-# Try PHP 8.4, 8.3, 8.2, 8.1 in order
 PHP_INSTALLED=false
-for PHP_VER in 8.4 8.3 8.2 8.1; do
-    if apt-cache show php${PHP_VER} >/dev/null 2>&1; then
-        echo -e "${YELLOW}   Found PHP ${PHP_VER} in repos, installing...${NC}"
-        apt install -y php${PHP_VER} php${PHP_VER}-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} 2>/dev/null && {
-            update-alternatives --set php /usr/bin/php${PHP_VER} 2>/dev/null || {
-                update-alternatives --install /usr/bin/php php /usr/bin/php${PHP_VER} ${PHP_VER//./} 2>/dev/null
-                update-alternatives --set php /usr/bin/php${PHP_VER} 2>/dev/null
-            }
-            PHP_INSTALLED=true
-            PHP_VERSION=${PHP_VER}
-            break
-        }
+PHP_VERSION=""
+
+# Check if PHP 8.1+ is already installed
+if command -v php &> /dev/null; then
+    CURRENT_PHP=$(php -r "echo PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;")
+    if [ "$(echo "$CURRENT_PHP >= 8.1" | bc -l 2>/dev/null)" = "1" ] || [[ "$CURRENT_PHP" =~ ^8\.[1-9]|^8\.[1-9][0-9]|^9\. ]]; then
+        PHP_VERSION=$CURRENT_PHP
+        PHP_INSTALLED=true
+        echo -e "${GREEN}   ✓ PHP $PHP_VERSION already installed${NC}"
     fi
-done
+fi
+
+# Check if compiled PHP exists in /tmp or /usr/local
+if [ "$PHP_INSTALLED" = false ]; then
+    if [ -d "/tmp/php-8.3.16" ] && [ -f "/tmp/php-8.3.16/sapi/cli/php" ]; then
+        echo -e "${YELLOW}   Found compiled PHP 8.3 in /tmp, resuming installation...${NC}"
+        cd /tmp/php-8.3.16
+        
+        echo -e "${CYAN}   Installing from existing build...${NC}"
+        make install >/dev/null 2>&1
+        
+        # Setup compiled PHP
+        mkdir -p /usr/local/php83/etc/php-fpm.d
+        cp /usr/local/php83/etc/php-fpm.conf.default /usr/local/php83/etc/php-fpm.conf 2>/dev/null || true
+        cp /usr/local/php83/etc/php-fpm.d/www.conf.default /usr/local/php83/etc/php-fpm.d/www.conf 2>/dev/null || true
+        ln -sf /usr/local/php83/bin/php /usr/bin/php
+        ln -sf /usr/local/php83/sbin/php-fpm /usr/sbin/php-fpm
+        
+        mkdir -p /etc/php/8.3/fpm/pool.d
+        ln -sf /usr/local/php83/etc/php-fpm.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf 2>/dev/null || true
+        
+        PHP_VERSION="8.3"
+        PHP_INSTALLED=true
+        
+        cd /root
+        echo -e "${GREEN}   ✓ Installed PHP from existing build${NC}"
+    elif [ -f "/usr/local/php83/bin/php" ]; then
+        echo -e "${GREEN}   ✓ Found compiled PHP 8.3 in /usr/local${NC}"
+        ln -sf /usr/local/php83/bin/php /usr/bin/php
+        ln -sf /usr/local/php83/sbin/php-fpm /usr/sbin/php-fpm
+        PHP_VERSION="8.3"
+        PHP_INSTALLED=true
+    fi
+fi
+
+# Try package manager if still not installed
+if [ "$PHP_INSTALLED" = false ]; then
+    if command -v add-apt-repository &> /dev/null; then
+        add-apt-repository ppa:ondrej/php -y 2>&1 | grep -v "GPG error" || true
+    fi
+    apt update -qq 2>&1 | grep -v "GPG error" || true
+    
+    # Try PHP 8.4, 8.3, 8.2, 8.1 in order
+    for PHP_VER in 8.4 8.3 8.2 8.1; do
+        if apt-cache show php${PHP_VER} >/dev/null 2>&1; then
+            echo -e "${YELLOW}   Found PHP ${PHP_VER} in repos, installing...${NC}"
+            apt install -y php${PHP_VER} php${PHP_VER}-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} 2>/dev/null && {
+                update-alternatives --set php /usr/bin/php${PHP_VER} 2>/dev/null || {
+                    update-alternatives --install /usr/bin/php php /usr/bin/php${PHP_VER} ${PHP_VER//./} 2>/dev/null
+                    update-alternatives --set php /usr/bin/php${PHP_VER} 2>/dev/null
+                }
+                PHP_INSTALLED=true
+                PHP_VERSION=${PHP_VER}
+                break
+            }
+        fi
+    done
+fi
 
 # If no PHP found, compile from source
 if [ "$PHP_INSTALLED" = false ]; then
-    echo -e "${RED}   ⚠ PHP 8.1+ not found in package repos${NC}"
+    echo -e "${YELLOW}   ⚠ No PHP 8.1+ found in package repos${NC}"
     echo -e "${YELLOW}   Need to compile PHP 8.3 from source (takes ~15 minutes)${NC}"
     read -p "   Compile PHP 8.3 now? (y/n) [y]: " COMPILE_PHP
     COMPILE_PHP=${COMPILE_PHP:-y}
@@ -220,40 +267,66 @@ if [ "$PHP_INSTALLED" = false ]; then
       libxml2-dev libsqlite3-dev libcurl4-openssl-dev libpng-dev libjpeg-dev \
       libonig-dev libzip-dev libssl-dev libpq-dev libreadline-dev 2>/dev/null || true
     
-    echo -e "${CYAN}   Downloading PHP 8.3.16...${NC}"
-    cd /tmp
-    wget -q https://www.php.net/distributions/php-8.3.16.tar.gz
-    tar -xzf php-8.3.16.tar.gz
+    # Check if tarball already downloaded
+    if [ ! -f "/tmp/php-8.3.16.tar.gz" ]; then
+        echo -e "${CYAN}   Downloading PHP 8.3.16...${NC}"
+        cd /tmp
+        wget -q https://www.php.net/distributions/php-8.3.16.tar.gz
+    else
+        echo -e "${GREEN}   Using existing PHP tarball${NC}"
+        cd /tmp
+    fi
+    
+    # Extract if not already extracted
+    if [ ! -d "/tmp/php-8.3.16" ]; then
+        echo -e "${CYAN}   Extracting PHP source...${NC}"
+        tar -xzf php-8.3.16.tar.gz
+    else
+        echo -e "${GREEN}   Using existing PHP source${NC}"
+    fi
+    
     cd php-8.3.16
     
-    echo -e "${CYAN}   Configuring PHP (5 mins)...${NC}"
-    ./configure --prefix=/usr/local/php83 \
-      --with-config-file-path=/usr/local/php83/etc \
-      --enable-fpm --with-fpm-user=www-data --with-fpm-group=www-data \
-      --with-openssl --with-curl --with-zlib --enable-bcmath --enable-mbstring \
-      --with-pdo-mysql --with-pdo-pgsql --with-pgsql --enable-gd --with-jpeg \
-      --enable-intl --with-zip --enable-sockets >/dev/null 2>&1
+    # Check if already configured
+    if [ ! -f "Makefile" ]; then
+        echo -e "${CYAN}   Configuring PHP (5 mins)...${NC}"
+        ./configure --prefix=/usr/local/php83 \
+          --with-config-file-path=/usr/local/php83/etc \
+          --enable-fpm --with-fpm-user=www-data --with-fpm-group=www-data \
+          --with-openssl --with-curl --with-zlib --enable-bcmath --enable-mbstring \
+          --with-pdo-mysql --with-pdo-pgsql --with-pgsql --enable-gd --with-jpeg \
+          --enable-intl --with-zip --enable-sockets >/dev/null 2>&1
+    else
+        echo -e "${GREEN}   PHP already configured${NC}"
+    fi
     
-    echo -e "${CYAN}   Compiling PHP (10 mins)...${NC}"
-    make -j$(nproc) >/dev/null 2>&1
+    # Check if already compiled
+    if [ ! -f "sapi/cli/php" ]; then
+        echo -e "${CYAN}   Compiling PHP (10 mins)...${NC}"
+        make -j$(nproc) >/dev/null 2>&1
+    else
+        echo -e "${GREEN}   PHP already compiled${NC}"
+    fi
+    
+    echo -e "${CYAN}   Installing PHP...${NC}"
     make install >/dev/null 2>&1
     
     # Setup compiled PHP
     mkdir -p /usr/local/php83/etc/php-fpm.d
-    cp /usr/local/php83/etc/php-fpm.conf.default /usr/local/php83/etc/php-fpm.conf
-    cp /usr/local/php83/etc/php-fpm.d/www.conf.default /usr/local/php83/etc/php-fpm.d/www.conf
+    cp /usr/local/php83/etc/php-fpm.conf.default /usr/local/php83/etc/php-fpm.conf 2>/dev/null || true
+    cp /usr/local/php83/etc/php-fpm.d/www.conf.default /usr/local/php83/etc/php-fpm.d/www.conf 2>/dev/null || true
     ln -sf /usr/local/php83/bin/php /usr/bin/php
     ln -sf /usr/local/php83/sbin/php-fpm /usr/sbin/php-fpm
     
     mkdir -p /etc/php/8.3/fpm/pool.d
-    ln -sf /usr/local/php83/etc/php-fpm.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf
+    ln -sf /usr/local/php83/etc/php-fpm.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf 2>/dev/null || true
     
     PHP_VERSION="8.3"
     PHP_INSTALLED=true
     
-    # Cleanup
+    # Cleanup only tarball, keep source for potential restart
     cd /root
-    rm -rf /tmp/php-8.3.16*
+    echo -e "${YELLOW}   ℹ Keeping PHP source in /tmp for potential restart${NC}"
 fi
 
 if [ "$PHP_INSTALLED" = true ]; then
@@ -305,17 +378,96 @@ echo -e "${GREEN}   ✓ Composer installed${NC}"
 # DOWNLOAD PANEL
 # ============================================================================
 echo -e "${CYAN}[8/21] Downloading Pelican Panel...${NC}"
-mkdir -p /var/www/pelican
-cd /var/www/pelican
-curl -L https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz 2>/dev/null | tar -xzv >/dev/null 2>&1
-echo -e "${GREEN}   ✓ Panel downloaded${NC}"
+
+# Check if panel already exists and is complete
+if [ -d "/var/www/pelican/app" ] && [ -f "/var/www/pelican/artisan" ] && [ -f "/var/www/pelican/composer.json" ]; then
+    echo -e "${GREEN}   ✓ Panel files already exist${NC}"
+    cd /var/www/pelican
+else
+    # Clean up any incomplete installation
+    if [ -d "/var/www/pelican" ]; then
+        echo -e "${YELLOW}   Cleaning up incomplete installation...${NC}"
+        mv /var/www/pelican /var/www/pelican.backup.$(date +%s) 2>/dev/null || rm -rf /var/www/pelican
+    fi
+    
+    mkdir -p /var/www/pelican
+    cd /var/www/pelican
+    
+    echo -e "${CYAN}   Downloading panel from GitHub...${NC}"
+    
+    # Try wget first (more reliable in containers)
+    if wget --show-progress -q https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz -O panel.tar.gz 2>/dev/null; then
+        echo -e "${GREEN}   ✓ Downloaded successfully${NC}"
+    else
+        echo -e "${YELLOW}   ⚠ wget failed, trying curl...${NC}"
+        curl -L --progress-bar https://github.com/pelican-dev/panel/releases/latest/download/panel.tar.gz -o panel.tar.gz 2>/dev/null || {
+            echo -e "${RED}❌ Download failed!${NC}"
+            exit 1
+        }
+    fi
+    
+    # Verify download size
+    FILE_SIZE=$(stat -f%z panel.tar.gz 2>/dev/null || stat -c%s panel.tar.gz 2>/dev/null)
+    if [ "$FILE_SIZE" -lt 2000000 ]; then
+        echo -e "${RED}❌ Download corrupted (file too small: $FILE_SIZE bytes)${NC}"
+        exit 1
+    fi
+    
+    echo -e "${CYAN}   Extracting panel...${NC}"
+    tar -xzf panel.tar.gz || {
+        echo -e "${RED}❌ Extraction failed!${NC}"
+        exit 1
+    }
+    rm panel.tar.gz
+    
+    # Verify extraction
+    if [ ! -f "artisan" ] || [ ! -d "app" ]; then
+        echo -e "${RED}❌ Panel files incomplete after extraction!${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}   ✓ Panel downloaded and extracted${NC}"
+fi
 
 # ============================================================================
 # INSTALL COMPOSER DEPENDENCIES
 # ============================================================================
 echo -e "${CYAN}[9/21] Installing Composer dependencies...${NC}"
-COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet
-echo -e "${GREEN}   ✓ Dependencies installed${NC}"
+
+# Check if vendor directory already exists
+if [ -d "vendor" ] && [ -f "vendor/autoload.php" ]; then
+    echo -e "${GREEN}   ✓ Dependencies already installed${NC}"
+else
+    # Check if composer.lock exists and is compatible
+    if [ -f "composer.lock" ]; then
+        echo -e "${YELLOW}   Checking composer.lock compatibility...${NC}"
+        if ! COMPOSER_ALLOW_SUPERUSER=1 composer check-platform-reqs --no-dev >/dev/null 2>&1; then
+            echo -e "${YELLOW}   ⚠ Lock file incompatible with PHP $(php -v | head -n1 | cut -d' ' -f2)${NC}"
+            echo -e "${CYAN}   Updating composer.lock...${NC}"
+            rm -f composer.lock
+        fi
+    fi
+
+    # Try normal install first
+    if COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet 2>&1 | grep -q "ext-sodium"; then
+        echo -e "${YELLOW}   ⚠ Missing PHP extensions, using --ignore-platform-reqs${NC}"
+        rm -f composer.lock
+        COMPOSER_ALLOW_SUPERUSER=1 composer update --no-dev --optimize-autoloader --ignore-platform-reqs --quiet 2>&1 | grep -v "Warning" || {
+            echo -e "${RED}❌ Composer install failed!${NC}"
+            exit 1
+        }
+    elif [ ! -d "vendor" ]; then
+        # Try update if install failed
+        echo -e "${YELLOW}   ⚠ Install failed, trying update...${NC}"
+        rm -f composer.lock
+        COMPOSER_ALLOW_SUPERUSER=1 composer update --no-dev --optimize-autoloader --ignore-platform-reqs --quiet 2>&1 | grep -v "Warning" || {
+            echo -e "${RED}❌ Composer update failed!${NC}"
+            exit 1
+        }
+    fi
+    
+    echo -e "${GREEN}   ✓ Dependencies installed${NC}"
+fi
 
 # ============================================================================
 # CONFIGURE ENVIRONMENT
@@ -374,26 +526,35 @@ echo -e "${GREEN}   ✓ Permissions set${NC}"
 # ============================================================================
 echo -e "${CYAN}[13/21] Configuring PHP-FPM...${NC}"
 
-# Handle both package and compiled PHP
-if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
+# Configure PHP-FPM to use port 9000
+if [ -f "/usr/local/php83/etc/php-fpm.d/www.conf" ]; then
+    sed -i 's|listen = .*|listen = 127.0.0.1:9000|' /usr/local/php83/etc/php-fpm.d/www.conf 2>/dev/null || true
+elif [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
     sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf 2>/dev/null || true
     sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf 2>/dev/null || true
-elif [ -f "/usr/local/php83/etc/php-fpm.d/www.conf" ]; then
-    sed -i 's|listen = .*|listen = 127.0.0.1:9000|' /usr/local/php83/etc/php-fpm.d/www.conf 2>/dev/null || true
 fi
 
-# Start PHP-FPM
-if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || service php${PHP_VERSION}-fpm restart 2>/dev/null || /usr/local/php83/sbin/php-fpm -D 2>/dev/null || true
-else
-    service php${PHP_VERSION}-fpm restart 2>/dev/null || pkill php-fpm; /usr/sbin/php-fpm -D 2>/dev/null || /usr/local/php83/sbin/php-fpm -D 2>/dev/null || true
-fi
-
-sleep 2
+# Check if PHP-FPM is already running
 if netstat -tulpn 2>/dev/null | grep -q ":9000" || ss -tlnp 2>/dev/null | grep -q ":9000"; then
-    echo -e "${GREEN}   ✓ PHP-FPM running on port 9000${NC}"
+    echo -e "${GREEN}   ✓ PHP-FPM already running on port 9000${NC}"
 else
-    echo -e "${YELLOW}   ⚠ PHP-FPM port check inconclusive, continuing...${NC}"
+    # Start PHP-FPM
+    if [ -f "/usr/local/php83/sbin/php-fpm" ]; then
+        /usr/local/php83/sbin/php-fpm -D 2>/dev/null || echo -e "${YELLOW}   ⚠ PHP-FPM start attempted${NC}"
+    elif [ "$HAS_SYSTEMD" = true ]; then
+        systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || service php${PHP_VERSION}-fpm restart 2>/dev/null || true
+    else
+        service php${PHP_VERSION}-fpm restart 2>/dev/null || pkill php-fpm; /usr/sbin/php-fpm -D 2>/dev/null || true
+    fi
+    
+    sleep 2
+    
+    # Verify it started
+    if netstat -tulpn 2>/dev/null | grep -q ":9000" || ss -tlnp 2>/dev/null | grep -q ":9000"; then
+        echo -e "${GREEN}   ✓ PHP-FPM running on port 9000${NC}"
+    else
+        echo -e "${YELLOW}   ⚠ PHP-FPM status unclear, continuing...${NC}"
+    fi
 fi
 
 # ============================================================================
@@ -526,6 +687,7 @@ fi
 # ============================================================================
 echo -e "${CYAN}[17/21] Installing Cloudflare Tunnel...${NC}"
 
+# Install cloudflared
 if ! command -v cloudflared &> /dev/null; then
     wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
     dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || {
@@ -535,25 +697,55 @@ if ! command -v cloudflared &> /dev/null; then
     rm -f cloudflared-linux-amd64.deb
 fi
 
+# Stop any existing cloudflared instances
 cloudflared service uninstall 2>/dev/null || true
 pkill cloudflared 2>/dev/null || true
 
-if [ "$HAS_SYSTEMD" = true ]; then
-    cloudflared service install "$CF_TOKEN" 2>/dev/null && {
-        systemctl start cloudflared 2>/dev/null || true
-        systemctl enable cloudflared 2>/dev/null || true
-    } || HAS_SYSTEMD=false
-fi
+echo -e "${GREEN}   ✓ Cloudflared installed${NC}"
+echo ""
+echo -e "${YELLOW}⚠️  IMPORTANT: Manual Cloudflare Tunnel Setup Required${NC}"
+echo ""
+echo -e "${CYAN}To complete the installation:${NC}"
+echo ""
+echo -e "1. Go to: ${BLUE}https://one.dash.cloudflare.com/${NC}"
+echo -e "2. Navigate to: ${GREEN}Zero Trust → Networks → Tunnels${NC}"
+echo -e "3. Create or select your tunnel"
+echo -e "4. Click ${GREEN}Configure${NC} → ${GREEN}Public Hostname${NC} tab"
+echo -e "5. Add hostname with these settings:"
+echo -e "   ${CYAN}Subdomain:${NC} panel (or your choice)"
+echo -e "   ${CYAN}Domain:${NC} ${PANEL_DOMAIN##*.}"
+echo -e "   ${CYAN}Service Type:${NC} HTTPS"
+echo -e "   ${CYAN}URL:${NC} ${YELLOW}127.0.0.1:8443${NC} ${RED}(NOT localhost!)${NC}"
+echo -e "   ${CYAN}TLS Settings:${NC} Enable ${GREEN}'No TLS Verify'${NC}"
+echo ""
+echo -e "6. Copy the tunnel token from the install command"
+echo -e "7. Run this command to start the tunnel:"
+echo -e "   ${GREEN}nohup cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:58080 run --token \"YOUR_TOKEN\" > /var/log/cloudflared.log 2>&1 &${NC}"
+echo ""
+echo -e "${YELLOW}Note: In container environments, always use 127.0.0.1 instead of localhost${NC}"
+echo ""
 
-if [ "$HAS_SYSTEMD" = false ]; then
-    nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
-fi
+# Wait for user to set up tunnel
+read -p "Press Enter after you've configured the Cloudflare Tunnel and have your token ready..."
 
-sleep 3
-if ps aux | grep -v grep | grep -q cloudflared; then
-    echo -e "${GREEN}   ✓ Cloudflare Tunnel running${NC}"
+# Prompt for tunnel token
+read -p "Enter your Cloudflare Tunnel token: " CF_TUNNEL_TOKEN
+
+if [ -n "$CF_TUNNEL_TOKEN" ]; then
+    # Start cloudflared with the token
+    nohup cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:58080 run --token "$CF_TUNNEL_TOKEN" > /var/log/cloudflared.log 2>&1 &
+    
+    sleep 3
+    
+    if ps aux | grep -v grep | grep -q cloudflared; then
+        echo -e "${GREEN}   ✓ Cloudflare Tunnel started${NC}"
+    else
+        echo -e "${YELLOW}   ⚠ Cloudflare Tunnel status unclear${NC}"
+        echo -e "${YELLOW}   Check logs: tail -f /var/log/cloudflared.log${NC}"
+    fi
 else
-    echo -e "${YELLOW}   ⚠ Cloudflare Tunnel status unclear${NC}"
+    echo -e "${YELLOW}   ⚠ No token provided, tunnel not started${NC}"
+    echo -e "${YELLOW}   Start manually: cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:58080 run --token \"YOUR_TOKEN\"${NC}"
 fi
 
 # ============================================================================
@@ -616,12 +808,13 @@ echo -e "   Cloudflare Dashboard: ${BLUE}https://one.dash.cloudflare.com/${NC}"
 echo ""
 
 echo -e "${CYAN}🔧 CLOUDFLARE TUNNEL SETUP:${NC}"
+echo -e "   ${RED}IMPORTANT:${NC} Use ${YELLOW}127.0.0.1:8443${NC} (NOT localhost) in tunnel config"
 echo -e "   1. Go to Zero Trust → Networks → Tunnels"
 echo -e "   2. Click your tunnel → Configure"
 echo -e "   3. Add Public Hostname:"
 echo -e "      - Subdomain: ${GREEN}$(echo $PANEL_DOMAIN | cut -d'.' -f1)${NC}"
 echo -e "      - Domain: ${GREEN}$(echo $PANEL_DOMAIN | cut -d'.' -f2-)${NC}"
-echo -e "      - Service: ${GREEN}HTTPS → localhost:8443${NC}"
+echo -e "      - Service: ${GREEN}HTTPS → 127.0.0.1:8443${NC} ${RED}(NOT localhost!)${NC}"
 echo -e "      - ${YELLOW}Enable 'No TLS Verify'${NC}"
 echo ""
 
