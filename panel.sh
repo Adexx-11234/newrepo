@@ -165,7 +165,7 @@ echo -e "${GREEN}   ✓ System updated${NC}"
 # ============================================================================
 echo -e "${CYAN}[4/18] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget tar unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
+    gnupg lsb-release wget tar curl unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
 echo -e "${GREEN}   ✓ Dependencies installed (including nano)${NC}"
 
 # ============================================================================
