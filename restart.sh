@@ -1,9 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT
+# PELICAN AUTO-RESTART SCRIPT v2.0 - FIXED
 # For GitHub Codespaces - Starts everything after sleep/restart
-# Run this manually or add to .bashrc for automatic startup
+# FIXED: Proper PHP-FPM detection and startup
 ################################################################################
 
 RED='\033[0;31m'
@@ -32,6 +32,9 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
+# Force system PHP path
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
+
 SERVICES_STARTED=0
 
 # ============================================================================
@@ -46,9 +49,9 @@ else
     echo -e "${YELLOW}   ⚠ Docker not running, starting...${NC}"
     pkill dockerd 2>/dev/null || true
     sleep 1
-    dockerd > /var/log/docker.log 2>&1 &
+    nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
     
-    # Wait for Docker to be ready (max 15 seconds)
+    # Wait for Docker (max 15 seconds)
     for i in {1..15}; do
         if docker ps >/dev/null 2>&1; then
             echo -e "${GREEN}   ✓ Docker started${NC}"
@@ -68,40 +71,75 @@ fi
 # ============================================================================
 echo -e "${CYAN}[2/6] Starting Redis...${NC}"
 
-if pgrep redis-server >/dev/null; then
+if redis-cli ping >/dev/null 2>&1; then
     echo -e "${GREEN}   ✓ Redis already running${NC}"
     ((SERVICES_STARTED++))
 else
     echo -e "${YELLOW}   ⚠ Redis not running, starting...${NC}"
-    service redis-server start 2>/dev/null || redis-server --daemonize yes 2>/dev/null || true
-    sleep 1
     
-    if pgrep redis-server >/dev/null; then
+    # Try service command first
+    service redis-server start 2>/dev/null || redis-server --daemonize yes 2>/dev/null || true
+    sleep 2
+    
+    if redis-cli ping >/dev/null 2>&1; then
         echo -e "${GREEN}   ✓ Redis started${NC}"
         ((SERVICES_STARTED++))
     else
-        echo -e "${YELLOW}   ⚠ Redis start inconclusive${NC}"
+        echo -e "${RED}   ✗ Redis failed to start${NC}"
     fi
 fi
 
 # ============================================================================
-# 3. START PHP-FPM
+# 3. START PHP-FPM (FIXED)
 # ============================================================================
 echo -e "${CYAN}[3/6] Starting PHP-FPM...${NC}"
 
-if pgrep php-fpm >/dev/null; then
-    echo -e "${GREEN}   ✓ PHP-FPM already running${NC}"
-    ((SERVICES_STARTED++))
+# Detect PHP version
+PHP_VERSION=""
+for ver in 8.3 8.4 8.2; do
+    if [ -f "/usr/sbin/php-fpm${ver}" ] || [ -f "/usr/sbin/php-fpm" ]; then
+        PHP_VERSION=$ver
+        break
+    fi
+done
+
+if [ -z "$PHP_VERSION" ]; then
+    echo -e "${RED}   ✗ PHP-FPM not found${NC}"
 else
-    echo -e "${YELLOW}   ⚠ PHP-FPM not running, starting...${NC}"
-    service php8.4-fpm start 2>/dev/null || /usr/sbin/php-fpm8.4 -D 2>/dev/null || true
-    sleep 1
-    
-    if pgrep php-fpm >/dev/null; then
-        echo -e "${GREEN}   ✓ PHP-FPM started${NC}"
+    # Check if already running on port 9000
+    if netstat -tulpn 2>/dev/null | grep -q ":9000.*LISTEN"; then
+        echo -e "${GREEN}   ✓ PHP-FPM already running (port 9000)${NC}"
         ((SERVICES_STARTED++))
     else
-        echo -e "${RED}   ✗ PHP-FPM failed to start${NC}"
+        echo -e "${YELLOW}   ⚠ PHP-FPM not running, starting...${NC}"
+        
+        # Kill any stuck PHP-FPM processes
+        pkill -9 php-fpm 2>/dev/null || true
+        sleep 1
+        
+        # Try different start methods
+        if service php${PHP_VERSION}-fpm start 2>/dev/null; then
+            echo -e "${GREEN}   ✓ Started via service command${NC}"
+        elif /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null; then
+            echo -e "${GREEN}   ✓ Started via direct binary${NC}"
+        elif php-fpm${PHP_VERSION} 2>/dev/null; then
+            echo -e "${GREEN}   ✓ Started via PATH binary${NC}"
+        else
+            echo -e "${RED}   ✗ All start methods failed${NC}"
+        fi
+        
+        sleep 2
+        
+        # Verify it started
+        if netstat -tulpn 2>/dev/null | grep -q ":9000.*LISTEN"; then
+            echo -e "${GREEN}   ✓ PHP-FPM is now listening on port 9000${NC}"
+            ((SERVICES_STARTED++))
+        else
+            echo -e "${RED}   ✗ PHP-FPM failed to start on port 9000${NC}"
+            echo -e "${YELLOW}   Troubleshooting:${NC}"
+            echo -e "${YELLOW}   Check config: /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf${NC}"
+            echo -e "${YELLOW}   Should have: listen = 127.0.0.1:9000${NC}"
+        fi
     fi
 fi
 
@@ -110,19 +148,29 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/6] Starting Nginx...${NC}"
 
-if pgrep nginx >/dev/null; then
-    echo -e "${GREEN}   ✓ Nginx already running${NC}"
+if pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443"; then
+    echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
     ((SERVICES_STARTED++))
 else
     echo -e "${YELLOW}   ⚠ Nginx not running, starting...${NC}"
-    service nginx start 2>/dev/null || nginx 2>/dev/null || true
+    
+    # Kill any stuck processes
+    pkill nginx 2>/dev/null || true
     sleep 1
     
-    if pgrep nginx >/dev/null; then
-        echo -e "${GREEN}   ✓ Nginx started${NC}"
+    # Test nginx config first
+    nginx -t 2>/dev/null
+    
+    # Start nginx
+    service nginx start 2>/dev/null || nginx 2>/dev/null || true
+    sleep 2
+    
+    if pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443"; then
+        echo -e "${GREEN}   ✓ Nginx started (port 8443)${NC}"
         ((SERVICES_STARTED++))
     else
         echo -e "${RED}   ✗ Nginx failed to start${NC}"
+        echo -e "${YELLOW}   Check: tail -f /var/log/nginx/error.log${NC}"
     fi
 fi
 
@@ -139,8 +187,16 @@ else
     
     if [ -d "/var/www/pelican" ]; then
         cd /var/www/pelican
+        
+        # Kill any stuck workers
         pkill -f "queue:work" 2>/dev/null || true
-        nohup sudo -u www-data php artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
+        sleep 1
+        
+        # Use system PHP
+        PHP_BIN="/usr/bin/php8.3"
+        [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
+        
+        nohup sudo -u www-data $PHP_BIN artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
         sleep 2
         
         if pgrep -f "queue:work" >/dev/null; then
@@ -148,6 +204,7 @@ else
             ((SERVICES_STARTED++))
         else
             echo -e "${RED}   ✗ Queue worker failed to start${NC}"
+            echo -e "${YELLOW}   Check: tail -f /var/log/pelican-queue.log${NC}"
         fi
     else
         echo -e "${YELLOW}   ⚠ Panel not installed, skipping${NC}"
@@ -162,17 +219,16 @@ echo -e "${CYAN}[6/6] Starting Wings & Cloudflare Tunnels...${NC}"
 # Start Wings
 if pgrep -x wings >/dev/null; then
     echo -e "${GREEN}   ✓ Wings already running${NC}"
-    ((SERVICES_STARTED++))
 else
     if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
         echo -e "${YELLOW}   ⚠ Wings not running, starting...${NC}"
         pkill wings 2>/dev/null || true
+        cd /etc/pelican
         nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &
-        sleep 2
+        sleep 3
         
         if pgrep -x wings >/dev/null; then
             echo -e "${GREEN}   ✓ Wings started${NC}"
-            ((SERVICES_STARTED++))
         else
             echo -e "${RED}   ✗ Wings failed to start${NC}"
             echo -e "${YELLOW}   Check: tail -f /tmp/wings.log${NC}"
@@ -186,30 +242,20 @@ fi
 echo ""
 echo -e "${CYAN}   Starting Cloudflare Tunnels...${NC}"
 
-TUNNELS_STARTED=0
+# Kill old tunnels
+pkill cloudflared 2>/dev/null || true
+sleep 2
 
 # Panel Tunnel
-if pgrep -f "cloudflared.*tunnel.*run" | grep -v "wings" >/dev/null; then
-    echo -e "${GREEN}   ✓ Panel tunnel already running${NC}"
-    ((TUNNELS_STARTED++))
-else
-    if [ -n "$CF_TOKEN" ]; then
-        echo -e "${YELLOW}   ⚠ Panel tunnel not running, starting...${NC}"
-        nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
-        sleep 2
-        echo -e "${GREEN}   ✓ Panel tunnel started${NC}"
-        ((TUNNELS_STARTED++))
-    else
-        echo -e "${YELLOW}   ⚠ No CF_TOKEN found, skipping panel tunnel${NC}"
-    fi
+if [ -n "$CF_TOKEN" ]; then
+    echo -e "${YELLOW}   Starting Panel tunnel...${NC}"
+    nohup cloudflared tunnel --no-autoupdate run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
+    sleep 2
+    echo -e "${GREEN}   ✓ Panel tunnel started${NC}"
 fi
 
-# Wings Tunnel (if different from panel)
-# Check if there's a separate wings tunnel running
-if pgrep -f "cloudflared.*wings" >/dev/null; then
-    echo -e "${GREEN}   ✓ Wings tunnel already running${NC}"
-    ((TUNNELS_STARTED++))
-fi
+# Wings Tunnel (if separate token exists)
+# Add logic here if you have a separate CF_TOKEN_WINGS
 
 # ============================================================================
 # VERIFICATION
@@ -228,17 +274,18 @@ else
 fi
 
 # Redis
-if pgrep redis-server >/dev/null; then
+if redis-cli ping >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Redis:        Running${NC}"
 else
     echo -e "${RED}✗ Redis:        Not Running${NC}"
 fi
 
 # PHP-FPM
-if pgrep php-fpm >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":9000"; then
-    echo -e "${GREEN}✓ PHP-FPM:      Running (port 9000)${NC}"
+if netstat -tulpn 2>/dev/null | grep -q ":9000.*LISTEN"; then
+    PHP_PID=$(netstat -tulpn 2>/dev/null | grep ":9000" | awk '{print $7}' | cut -d'/' -f1)
+    echo -e "${GREEN}✓ PHP-FPM:      Running (port 9000, PID: $PHP_PID)${NC}"
 else
-    echo -e "${RED}✗ PHP-FPM:      Not Running${NC}"
+    echo -e "${RED}✗ PHP-FPM:      Not Running on port 9000${NC}"
 fi
 
 # Nginx
@@ -279,13 +326,24 @@ echo -e "${CYAN}║           Quick Health Check           ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-# Test Panel
+# Test Panel (local)
 if [ -d "/var/www/pelican" ]; then
-    PANEL_TEST=$(curl -k -s -o /dev/null -w "%{http_code}" http://localhost:8443/ 2>/dev/null || echo "000")
+    PANEL_TEST=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:8443/ 2>/dev/null || echo "000")
     if [ "$PANEL_TEST" = "200" ] || [ "$PANEL_TEST" = "302" ]; then
-        echo -e "${GREEN}✓ Panel:        Responding (HTTP $PANEL_TEST)${NC}"
+        echo -e "${GREEN}✓ Panel Local:  HTTP $PANEL_TEST${NC}"
     else
-        echo -e "${YELLOW}⚠ Panel:        HTTP $PANEL_TEST${NC}"
+        echo -e "${RED}✗ Panel Local:  HTTP $PANEL_TEST (Should be 200 or 302)${NC}"
+    fi
+    
+    # Test via Cloudflare (if domain set)
+    if [ -n "$PANEL_DOMAIN" ]; then
+        sleep 2
+        PANEL_CF_TEST=$(curl -s -o /dev/null -w "%{http_code}" https://${PANEL_DOMAIN}/ 2>/dev/null || echo "000")
+        if [ "$PANEL_CF_TEST" = "200" ] || [ "$PANEL_CF_TEST" = "302" ]; then
+            echo -e "${GREEN}✓ Panel Remote: HTTP $PANEL_CF_TEST${NC}"
+        else
+            echo -e "${RED}✗ Panel Remote: HTTP $PANEL_CF_TEST${NC}"
+        fi
     fi
 fi
 
@@ -293,9 +351,9 @@ fi
 if [ -f "/usr/local/bin/wings" ]; then
     WINGS_TEST=$(curl -k -s https://localhost:8080/api/system 2>&1 || echo "FAILED")
     if echo "$WINGS_TEST" | grep -q "authorization"; then
-        echo -e "${GREEN}✓ Wings API:    Responding${NC}"
+        echo -e "${GREEN}✓ Wings Local:  Responding${NC}"
     else
-        echo -e "${YELLOW}⚠ Wings API:    Not responding${NC}"
+        echo -e "${YELLOW}⚠ Wings Local:  Not responding${NC}"
     fi
 fi
 
@@ -308,7 +366,15 @@ echo -e "${CYAN}║              Summary                   ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-if [ "$SERVICES_STARTED" -ge 5 ]; then
+# Check critical services
+CRITICAL_OK=0
+docker ps >/dev/null 2>&1 && ((CRITICAL_OK++))
+redis-cli ping >/dev/null 2>&1 && ((CRITICAL_OK++))
+netstat -tulpn 2>/dev/null | grep -q ":9000" && ((CRITICAL_OK++))
+netstat -tulpn 2>/dev/null | grep -q ":8443" && ((CRITICAL_OK++))
+pgrep -f "queue:work" >/dev/null && ((CRITICAL_OK++))
+
+if [ "$CRITICAL_OK" -ge 5 ]; then
     echo -e "${GREEN}✅ All critical services are running!${NC}"
     echo ""
     if [ -n "$PANEL_DOMAIN" ]; then
@@ -318,18 +384,31 @@ if [ "$SERVICES_STARTED" -ge 5 ]; then
         echo -e "${CYAN}Wings URL:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
     fi
 else
-    echo -e "${YELLOW}⚠️  Some services failed to start${NC}"
+    echo -e "${RED}❌ Some critical services failed to start ($CRITICAL_OK/5)${NC}"
     echo ""
-    echo -e "${CYAN}Troubleshooting:${NC}"
-    echo -e "  • Check logs: ${BLUE}tail -f /var/log/nginx/pelican.app-error.log${NC}"
-    echo -e "  • Check queue: ${BLUE}tail -f /var/log/pelican-queue.log${NC}"
-    echo -e "  • Check Wings: ${BLUE}tail -f /tmp/wings.log${NC}"
+    echo -e "${CYAN}Most Common Issues:${NC}"
+    
+    # Check PHP-FPM specifically
+    if ! netstat -tulpn 2>/dev/null | grep -q ":9000"; then
+        echo -e "${RED}  ✗ PHP-FPM not on port 9000${NC}"
+        echo -e "${YELLOW}    Fix: Edit /etc/php/8.3/fpm/pool.d/www.conf${NC}"
+        echo -e "${YELLOW}    Change: listen = 127.0.0.1:9000${NC}"
+        echo -e "${YELLOW}    Then run: service php8.3-fpm restart${NC}"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Troubleshooting Commands:${NC}"
+    echo -e "  • Panel logs:  ${BLUE}tail -f /var/log/nginx/pelican.app-error.log${NC}"
+    echo -e "  • PHP-FPM:     ${BLUE}tail -f /var/log/php8.3-fpm.log${NC}"
+    echo -e "  • Queue:       ${BLUE}tail -f /var/log/pelican-queue.log${NC}"
+    echo -e "  • Wings:       ${BLUE}tail -f /tmp/wings.log${NC}"
+    echo -e "  • Check ports: ${BLUE}netstat -tulpn | grep -E '9000|8443|8080'${NC}"
 fi
 
 echo ""
 echo -e "${CYAN}📝 Useful Commands:${NC}"
-echo -e "  • Restart everything: ${GREEN}sudo ./restart.sh${NC}"
-echo -e "  • Check services:     ${GREEN}ps aux | grep -E 'wings|php-fpm|nginx|redis|queue:work'${NC}"
-echo -e "  • Panel logs:         ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
-echo -e "  • Wings logs:         ${GREEN}tail -f /tmp/wings.log${NC}"
+echo -e "  • Restart everything:   ${GREEN}sudo $0${NC}"
+echo -e "  • Check all services:   ${GREEN}ps aux | grep -E 'wings|php-fpm|nginx|redis|queue:work'${NC}"
+echo -e "  • Fix PHP-FPM config:   ${GREEN}nano /etc/php/8.3/fpm/pool.d/www.conf${NC}"
+echo -e "  • Restart PHP-FPM:      ${GREEN}service php8.3-fpm restart${NC}"
 echo ""
