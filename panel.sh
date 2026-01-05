@@ -487,9 +487,39 @@ echo -e "${GREEN}   ✓ Nginx configured on port 8443 (IPv4 + IPv6)${NC}"
 # RUN DATABASE MIGRATIONS
 # ============================================================================
 echo -e "${CYAN}[14/18] Running database migrations...${NC}"
-$PHP_BIN artisan migrate --force || {
-    echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
-}
+
+# Check if this is a fresh installation or an upgrade
+if [ -f "/var/www/pelican/.installation_complete" ]; then
+    echo -e "${YELLOW}   ⚠ Existing installation detected${NC}"
+    read -p "   Use migrate:fresh? This will DELETE ALL DATA! (yes/NO): " CONFIRM_FRESH
+    
+    if [ "$CONFIRM_FRESH" = "yes" ]; then
+        echo -e "${RED}   🗑️  Dropping all tables and recreating...${NC}"
+        cd /var/www/pelican
+        $PHP_BIN artisan migrate:fresh --force || {
+            echo -e "${RED}   ❌ Migration failed!${NC}"
+            exit 1
+        }
+        echo -e "${GREEN}   ✓ Database reset complete${NC}"
+    else
+        echo -e "${BLUE}   Running normal migration...${NC}"
+        cd /var/www/pelican
+        $PHP_BIN artisan migrate --force || {
+            echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
+        }
+        echo -e "${GREEN}   ✓ Database updated${NC}"
+    fi
+else
+    # Fresh installation - safe to use migrate:fresh
+    echo -e "${BLUE}   Fresh installation - initializing database...${NC}"
+    cd /var/www/pelican
+    $PHP_BIN artisan migrate:fresh --force || {
+        echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
+    }
+    touch /var/www/pelican/.installation_complete
+    echo -e "${GREEN}   ✓ Database initialized${NC}"
+fi
+
 echo -e "${GREEN}   ✓ Database ready${NC}"
 
 # ============================================================================
