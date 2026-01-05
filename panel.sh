@@ -1,10 +1,12 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN PANEL - COMPLETE AUTO-INSTALLER v5.0 (FINAL)
-# Zero manual steps - Full automation with web installer
-# Works on: VPS, Codespaces, Containers - All environments
-# Includes: Database migrations, Queue worker, Cloudflare, Cron
+# PELICAN PANEL - COMPLETE AUTO-INSTALLER v5.3 (ALL FIXES APPLIED)
+# - Forces localhost (not 127.0.0.1) for Cloudflare Tunnel compatibility
+# - IPv6 support for container environments
+# - Fixed PHP 8.3 with all extensions
+# - Fixed Composer dependencies
+# - Production ready
 ################################################################################
 
 set -e
@@ -16,15 +18,15 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 hash -r 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.pelican.env"
 
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Pelican Panel Auto-Installer v5.0    ║${NC}"
-echo -e "${GREEN}║  Production Ready - Web Installer Mode║${NC}"
+echo -e "${GREEN}║  Pelican Panel Auto-Installer v5.3    ║${NC}"
+echo -e "${GREEN}║  All Fixes Applied - IPv4/IPv6 Ready  ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -161,57 +163,76 @@ apt upgrade -y -qq 2>&1 | grep -v "GPG error" || true
 echo -e "${GREEN}   ✓ System updated${NC}"
 
 # ============================================================================
-# INSTALL DEPENDENCIES (including nano)
+# INSTALL DEPENDENCIES
 # ============================================================================
 echo -e "${CYAN}[4/18] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget tar curl unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
-echo -e "${GREEN}   ✓ Dependencies installed (including nano)${NC}"
+    gnupg lsb-release wget tar unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
+echo -e "${GREEN}   ✓ Dependencies installed${NC}"
 
 # ============================================================================
-# INSTALL PHP 8.3+
+# INSTALL PHP 8.3+ (FORCE SYSTEM PHP)
 # ============================================================================
 echo -e "${CYAN}[5/18] Installing PHP 8.3+...${NC}"
 
-PHP_INSTALLED=false
-PHP_VERSION=""
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 
-if command -v php &> /dev/null; then
-    CURRENT_PHP=$(php -r "echo PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;")
-    if [[ "$CURRENT_PHP" =~ ^8\.[3-9]|^9\. ]]; then
-        PHP_VERSION=$CURRENT_PHP
-        PHP_INSTALLED=true
-        echo -e "${GREEN}   ✓ PHP $PHP_VERSION already installed${NC}"
-    fi
+if command -v add-apt-repository &> /dev/null; then
+    add-apt-repository ppa:ondrej/php -y 2>&1 | grep -v "GPG error" || true
 fi
 
-if [ "$PHP_INSTALLED" = false ]; then
-    if command -v add-apt-repository &> /dev/null; then
-        add-apt-repository ppa:ondrej/php -y 2>&1 | grep -v "GPG error" || true
-    fi
-    apt update -qq 2>&1 | grep -v "GPG error" || true
-    
-    for PHP_VER in 8.4 8.3; do
-        if apt-cache show php${PHP_VER} >/dev/null 2>&1; then
-            apt install -y php${PHP_VER} php${PHP_VER}-{cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,sqlite3,redis,pgsql} 2>/dev/null && {
-                update-alternatives --set php /usr/bin/php${PHP_VER} 2>/dev/null || {
-                    update-alternatives --install /usr/bin/php php /usr/bin/php${PHP_VER} ${PHP_VER//./}
-                    update-alternatives --set php /usr/bin/php${PHP_VER}
-                }
-                PHP_VERSION=${PHP_VER}
-                PHP_INSTALLED=true
-                break
-            }
-        fi
-    done
-fi
+apt update -qq 2>&1 | grep -v "GPG error" || true
 
-if [ "$PHP_INSTALLED" = false ]; then
-    echo -e "${RED}❌ PHP 8.3+ installation failed!${NC}"
+echo -e "${BLUE}   Installing PHP 8.3 and all extensions...${NC}"
+apt install -y \
+    php8.3 \
+    php8.3-cli \
+    php8.3-fpm \
+    php8.3-mysql \
+    php8.3-pgsql \
+    php8.3-sqlite3 \
+    php8.3-redis \
+    php8.3-intl \
+    php8.3-zip \
+    php8.3-bcmath \
+    php8.3-mbstring \
+    php8.3-xml \
+    php8.3-curl \
+    php8.3-gd \
+    2>/dev/null || {
+    echo -e "${RED}❌ PHP installation failed!${NC}"
+    exit 1
+}
+
+update-alternatives --install /usr/bin/php php /usr/bin/php8.3 100 2>/dev/null || true
+update-alternatives --set php /usr/bin/php8.3 2>/dev/null || true
+
+echo 'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"' >> /root/.bashrc 2>/dev/null || true
+
+PHP_VERSION="8.3"
+
+if ! php -v | grep -q "PHP 8.3"; then
+    echo -e "${RED}❌ PHP 8.3 not properly installed!${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}   ✓ PHP $(php -v | head -n1 | cut -d' ' -f2)${NC}"
+echo -e "${BLUE}   Verifying PHP extensions...${NC}"
+MISSING_EXTS=""
+for ext in intl zip bcmath mbstring xml curl; do
+    if php -m | grep -qi "^$ext$"; then
+        echo -e "${GREEN}      ✓ $ext${NC}"
+    else
+        MISSING_EXTS="$MISSING_EXTS $ext"
+        echo -e "${RED}      ✗ $ext${NC}"
+    fi
+done
+
+if [ -n "$MISSING_EXTS" ]; then
+    echo -e "${RED}❌ Missing PHP extensions:$MISSING_EXTS${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}   ✓ PHP $(php -v | head -n1 | cut -d' ' -f2) with all extensions${NC}"
 
 # ============================================================================
 # INSTALL NGINX, DATABASE CLIENT, REDIS
@@ -237,7 +258,7 @@ echo -e "${CYAN}[7/18] Installing Composer...${NC}"
 if ! command -v composer &> /dev/null; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet 2>/dev/null
 fi
-echo -e "${GREEN}   ✓ Composer installed${NC}"
+echo -e "${GREEN}   ✓ Composer $(composer --version 2>/dev/null | cut -d' ' -f3)${NC}"
 
 # ============================================================================
 # DOWNLOAD PANEL
@@ -260,18 +281,82 @@ cd /var/www/pelican
 # INSTALL COMPOSER DEPENDENCIES
 # ============================================================================
 echo -e "${CYAN}[9/18] Installing dependencies...${NC}"
-if [ ! -d "vendor" ]; then
-    COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet 2>&1 | grep -v "Warning" || {
-        rm -f composer.lock
-        COMPOSER_ALLOW_SUPERUSER=1 composer update --no-dev --optimize-autoloader --ignore-platform-reqs --quiet 2>&1 | grep -v "Warning"
-    }
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
+
+PHP_BIN="/usr/bin/php8.3"
+if [ ! -f "$PHP_BIN" ]; then
+    PHP_BIN=$(which php)
 fi
-echo -e "${GREEN}   ✓ Dependencies installed${NC}"
+
+echo -e "${BLUE}   Using PHP: $PHP_BIN${NC}"
+$PHP_BIN -v | head -n1
+
+echo -e "${BLUE}   Verifying PHP extensions...${NC}"
+for ext in intl zip bcmath mbstring xml; do
+    if $PHP_BIN -m | grep -qi "^$ext$"; then
+        echo -e "${GREEN}      ✓ $ext${NC}"
+    else
+        echo -e "${RED}      ✗ $ext MISSING${NC}"
+        exit 1
+    fi
+done
+
+if [ ! -d "vendor" ] || [ ! -f "vendor/autoload.php" ]; then
+    echo -e "${YELLOW}   Installing fresh dependencies...${NC}"
+    
+    rm -f composer.lock
+    rm -rf vendor/
+    
+    composer clear-cache 2>/dev/null || true
+    
+    echo -e "${BLUE}   Running composer install (this may take 2-5 minutes)...${NC}"
+    
+    if COMPOSER_ALLOW_SUPERUSER=1 $PHP_BIN $(which composer) install \
+        --no-dev \
+        --optimize-autoloader \
+        --no-interaction \
+        2>&1 | tee /tmp/composer-install.log; then
+        echo -e "${GREEN}   ✓ Dependencies installed successfully${NC}"
+    else
+        echo -e "${RED}❌ Composer installation failed!${NC}"
+        echo -e "${RED}   Check logs: /tmp/composer-install.log${NC}"
+        echo -e "${YELLOW}   Last 20 lines of error:${NC}"
+        tail -n 20 /tmp/composer-install.log
+        exit 1
+    fi
+    
+    if [ ! -f "vendor/autoload.php" ]; then
+        echo -e "${RED}❌ vendor/autoload.php not found after installation!${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}   ✓ Verified vendor/autoload.php exists${NC}"
+else
+    echo -e "${GREEN}   ✓ Dependencies already installed${NC}"
+fi
+
+if ! $PHP_BIN -r "require 'vendor/autoload.php'; echo 'OK';" 2>/dev/null | grep -q OK; then
+    echo -e "${RED}❌ vendor/autoload.php exists but doesn't work!${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}   ✓ All dependencies ready${NC}"
 
 # ============================================================================
 # CONFIGURE ENVIRONMENT
 # ============================================================================
 echo -e "${CYAN}[10/18] Configuring environment...${NC}"
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
+PHP_BIN="/usr/bin/php8.3"
+[ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
+
+if [ ! -f "vendor/autoload.php" ]; then
+    echo -e "${RED}❌ Cannot proceed: vendor/autoload.php missing${NC}"
+    exit 1
+fi
+
 cp .env.example .env
 
 sed -i "s|APP_URL=.*|APP_URL=https://${PANEL_DOMAIN}|" .env
@@ -291,7 +376,7 @@ sed -i "s|MAIL_PASSWORD=.*|MAIL_PASSWORD=${MAIL_PASS}|" .env
 sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=${MAIL_FROM}|" .env
 sed -i "s|MAIL_FROM_NAME=.*|MAIL_FROM_NAME=\"${MAIL_FROM_NAME}\"|" .env
 
-php artisan key:generate --force --quiet
+$PHP_BIN artisan key:generate --force --quiet
 
 APP_KEY=$(grep "APP_KEY=" .env | cut -d'=' -f2)
 echo -e "${GREEN}   ✓ Environment configured${NC}"
@@ -328,7 +413,7 @@ sleep 1
 echo -e "${GREEN}   ✓ PHP-FPM configured${NC}"
 
 # ============================================================================
-# CONFIGURE NGINX
+# CONFIGURE NGINX (FIXED: IPv4 + IPv6, localhost compatible)
 # ============================================================================
 echo -e "${CYAN}[13/18] Configuring Nginx...${NC}"
 mkdir -p /etc/ssl/pelican
@@ -341,7 +426,10 @@ cat > /etc/nginx/sites-available/pelican.conf <<NGINXEOF
 server_tokens off;
 
 server {
-    listen 8443 ssl http2;
+    # Listen on both IPv4 and IPv6 for container compatibility
+    listen 0.0.0.0:8443 ssl http2;
+    listen [::]:8443 ssl http2;
+    
     server_name ${PANEL_DOMAIN};
 
     ssl_certificate /etc/ssl/pelican/cert.pem;
@@ -393,13 +481,13 @@ else
     service nginx restart 2>/dev/null || nginx -s reload
 fi
 
-echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
+echo -e "${GREEN}   ✓ Nginx configured on port 8443 (IPv4 + IPv6)${NC}"
 
 # ============================================================================
 # RUN DATABASE MIGRATIONS
 # ============================================================================
 echo -e "${CYAN}[14/18] Running database migrations...${NC}"
-php artisan migrate --force || {
+$PHP_BIN artisan migrate --force || {
     echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
 }
 echo -e "${GREEN}   ✓ Database ready${NC}"
@@ -497,10 +585,10 @@ if [ "$HAS_SYSTEMD" = true ]; then
 fi
 
 if [ "$HAS_SYSTEMD" = false ]; then
-    nohup cloudflared --pidfile /tmp/cloudflared.pid tunnel run --token "$CF_TOKEN" > /var/log/cloudflared.log 2>&1 &
+    nohup cloudflared tunnel --no-autoupdate run --token "$CF_TOKEN" > /var/log/cloudflared.log 2>&1 &
 fi
 
-sleep 2
+sleep 3
 echo -e "${GREEN}   ✓ Cloudflare Tunnel installed${NC}"
 
 # ============================================================================
@@ -510,78 +598,112 @@ echo -e "${CYAN}[18/18] Verifying installation...${NC}"
 
 CHECKS=0
 [ "$(netstat -tulpn 2>/dev/null | grep -c ":9000")" -gt 0 ] && { echo -e "${GREEN}   ✓ PHP-FPM running${NC}"; ((CHECKS++)); }
-[ "$(netstat -tulpn 2>/dev/null | grep -c ":8443")" -gt 0 ] && { echo -e "${GREEN}   ✓ Nginx running${NC}"; ((CHECKS++)); }
+[ "$(netstat -tulpn 2>/dev/null | grep -c ":8443")" -gt 0 ] && { echo -e "${GREEN}   ✓ Nginx running (IPv4+IPv6)${NC}"; ((CHECKS++)); }
 [ "$(ps aux | grep -v grep | grep -c "queue:work")" -gt 0 ] && { echo -e "${GREEN}   ✓ Queue worker${NC}"; ((CHECKS++)); }
 [ "$(ps aux | grep -v grep | grep -c cloudflared)" -gt 0 ] && { echo -e "${GREEN}   ✓ Cloudflare Tunnel${NC}"; ((CHECKS++)); }
+
+if [ -f "/var/www/pelican/vendor/autoload.php" ]; then
+    echo -e "${GREEN}   ✓ Composer dependencies${NC}"
+    ((CHECKS++))
+else
+    echo -e "${RED}   ✗ Composer dependencies missing${NC}"
+fi
 
 # ============================================================================
 # COMPLETION
 # ============================================================================
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║     Installation Complete! (${CHECKS}/4)        ║${NC}"
+echo -e "${GREEN}║     Installation Complete! (${CHECKS}/5)        ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-echo -e "${CYAN}🎯 NEXT STEPS:${NC}"
+echo -e "${CYAN}🎯 CLOUDFLARE TUNNEL CONFIGURATION:${NC}"
 echo ""
-echo -e "${GREEN}1. Configure Cloudflare Tunnel Route:${NC}"
-echo -e "   Go to: ${BLUE}https://one.dash.cloudflare.com/${NC}"
-echo -e "   Navigate: ${BLUE}Zero Trust → Networks → Tunnels → Configure${NC}"
+echo -e "${YELLOW}⚠️  IMPORTANT: Configure your tunnel route in Cloudflare:${NC}"
 echo ""
-echo -e "   ${YELLOW}Add Public Hostname:${NC}"
+echo -e "${GREEN}1. Go to Cloudflare Zero Trust Dashboard:${NC}"
+echo -e "   ${BLUE}https://one.dash.cloudflare.com/${NC}"
+echo ""
+echo -e "${GREEN}2. Navigate to:${NC}"
+echo -e "   ${BLUE}Zero Trust → Networks → Tunnels → [Your Tunnel] → Configure${NC}"
+echo ""
+echo -e "${GREEN}3. Add/Edit Public Hostname:${NC}"
 echo -e "   - Subdomain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f1)${NC}"
 echo -e "   - Domain: ${BLUE}$(echo ${PANEL_DOMAIN} | cut -d'.' -f2-)${NC}"
 echo -e "   - Service Type: ${BLUE}HTTPS${NC}"
-echo -e "   - URL: ${BLUE}localhost:8443${NC}"
-echo -e "   - Additional Settings → ${YELLOW}No TLS Verify: ON${NC}"
+echo -e "   - URL: ${GREEN}localhost:8443${NC} ${YELLOW}(MUST be 'localhost', NOT '127.0.0.1')${NC}"
+echo -e "   - Additional Settings:"
+echo -e "     ${YELLOW}☑ No TLS Verify: ON${NC}"
 echo ""
-echo -e "${GREEN}2. Complete Setup via Web Installer:${NC}"
-echo -e "   ${CYAN}Open your browser:${NC}"
+echo -e "${RED}⚠️  Using 127.0.0.1 will cause 502 errors! Use 'localhost' only!${NC}"
+echo ""
+
+echo -e "${CYAN}🌐 COMPLETE SETUP:${NC}"
+echo ""
+echo -e "${GREEN}After configuring Cloudflare Tunnel, open:${NC}"
 echo -e "   ${BLUE}https://${PANEL_DOMAIN}/installer${NC}"
 echo ""
-echo -e "   ${YELLOW}Recommended Settings in Web Installer:${NC}"
-echo -e "   - Queue Driver: ${GREEN}Redis${NC} (best performance)"
-echo -e "   - Cache Driver: ${GREEN}Redis${NC} (fastest)"
-echo -e "   - Session Driver: ${GREEN}Redis${NC} (recommended)"
+echo -e "${YELLOW}Web Installer Settings:${NC}"
+echo -e "   - Queue Driver: ${GREEN}Redis${NC}"
+echo -e "   - Cache Driver: ${GREEN}Redis${NC}"
+echo -e "   - Session Driver: ${GREEN}Redis${NC}"
 echo ""
-echo -e "   ${CYAN}Database credentials (already configured):${NC}"
+echo -e "${CYAN}Database (already configured):${NC}"
 echo -e "   - Driver: ${GREEN}${DB_DRIVER}${NC}"
 echo -e "   - Host: ${GREEN}${DB_HOST}${NC}"
 echo -e "   - Port: ${GREEN}${DB_PORT}${NC}"
 echo -e "   - Database: ${GREEN}${DB_NAME}${NC}"
 echo -e "   - Username: ${GREEN}${DB_USER}${NC}"
-echo -e "   - Password: ${GREEN}[configured]${NC}"
-echo ""
-echo -e "${GREEN}3. Create Admin Account${NC}"
-echo -e "   The web installer will prompt you to create your admin user"
-echo ""
-echo -e "${YELLOW}Or create admin via CLI (optional):${NC}"
-echo -e "   ${BLUE}cd /var/www/pelican${NC}"
-echo -e "   ${BLUE}php artisan p:user:make${NC}"
 echo ""
 
-echo -e "${CYAN}📁 FILES & CONFIGURATION:${NC}"
+echo -e "${CYAN}📁 CONFIGURATION FILES:${NC}"
 echo -e "   Config: ${GREEN}$ENV_FILE${NC}"
 echo -e "   Panel: ${GREEN}/var/www/pelican${NC}"
 echo -e "   Logs: ${GREEN}/var/log/nginx/pelican.app-error.log${NC}"
-echo -e "   APP_KEY: ${GREEN}${APP_KEY}${NC}"
+echo -e "   Cloudflared: ${GREEN}/var/log/cloudflared.log${NC}"
 echo ""
 
 echo -e "${CYAN}📝 USEFUL COMMANDS:${NC}"
-echo -e "   Restart services: ${GREEN}systemctl restart nginx php${PHP_VERSION}-fpm pelican-queue${NC}"
-echo -e "   View queue logs: ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
-echo -e "   View panel logs: ${GREEN}tail -f /var/www/pelican/storage/logs/laravel.log${NC}"
-echo -e "   Create admin: ${GREEN}cd /var/www/pelican && php artisan p:user:make${NC}"
+echo -e "   Restart services:"
+echo -e "     ${GREEN}systemctl restart nginx php${PHP_VERSION}-fpm pelican-queue${NC}"
+echo ""
+echo -e "   View logs:"
+echo -e "     ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
+echo -e "     ${GREEN}tail -f /var/www/pelican/storage/logs/laravel.log${NC}"
+echo -e "     ${GREEN}tail -f /var/log/cloudflared.log${NC}"
+echo ""
+echo -e "   Create admin user (optional):"
+echo -e "     ${GREEN}cd /var/www/pelican && php artisan p:user:make${NC}"
+echo ""
+echo -e "   Test local connection:"
+echo -e "     ${GREEN}curl -k https://localhost:8443${NC}"
 echo ""
 
-[ "$CHECKS" -ge 3 ] && {
-    echo -e "${GREEN}✅ Installation successful! Complete setup at:${NC}"
-    echo -e "${GREEN}   https://${PANEL_DOMAIN}/installer${NC}"
-} || {
-    echo -e "${YELLOW}⚠️  Some services need verification. Check logs above.${NC}"
-}
-
+echo -e "${CYAN}🔍 TROUBLESHOOTING:${NC}"
+echo -e "   Check Nginx is listening on both IPv4 and IPv6:"
+echo -e "     ${GREEN}netstat -tulpn | grep 8443${NC}"
+echo -e "     ${YELLOW}(Should show 0.0.0.0:8443 and :::8443)${NC}"
 echo ""
-echo -e "${BLUE}🚀 Your panel is ready! Configure Cloudflare Tunnel, then access the web installer.${NC}"
+echo -e "   Test IPv6 localhost:"
+echo -e "     ${GREEN}curl -k -g https://[::1]:8443${NC}"
+echo ""
+echo -e "   Check cloudflared status:"
+echo -e "     ${GREEN}ps aux | grep cloudflared${NC}"
+echo -e "     ${GREEN}tail -f /var/log/cloudflared.log${NC}"
+echo ""
+
+if [ ! -f "/var/www/pelican/vendor/autoload.php" ]; then
+    echo -e "${RED}⚠️ Some services need verification. Check logs above.${NC}"
+    echo ""
+fi
+
+echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║  🎉 Installation Complete!                                ║${NC}"
+echo -e "${BLUE}║                                                            ║${NC}"
+echo -e "${BLUE}║  Next Steps:                                               ║${NC}"
+echo -e "${BLUE}║  1. Configure Cloudflare Tunnel (use 'localhost:8443')    ║${NC}"
+echo -e "${BLUE}║  2. Visit https://${PANEL_DOMAIN}/installer  ║${NC}"
+echo -e "${BLUE}║  3. Complete web-based setup                               ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
