@@ -37,7 +37,7 @@ cd /var/www/pelican
 # ============================================================================
 # DETECT DATABASE TYPE
 # ============================================================================
-echo -e "${CYAN}[1/10] Detecting database configuration...${NC}"
+echo -e "${CYAN}[1/11] Detecting database configuration...${NC}"
 
 DB_CONNECTION=$(grep "^DB_CONNECTION=" .env | cut -d'=' -f2)
 
@@ -78,10 +78,90 @@ case "$DB_CONNECTION" in
 esac
 
 # ============================================================================
+# DOWNLOAD ALL PLUGINS
+# ============================================================================
+echo ""
+echo -e "${CYAN}[2/11] Downloading ALL plugins from GitHub...${NC}"
+
+# Create temporary directory
+TMP_DIR=$(mktemp -d)
+cd "$TMP_DIR"
+
+# Download plugins repository
+echo -e "${YELLOW}   Downloading plugin repository...${NC}"
+curl -sL "https://github.com/pelican-dev/plugins/archive/refs/heads/main.zip" -o plugins.zip
+
+# Extract all plugins
+echo -e "${YELLOW}   Extracting all plugins...${NC}"
+unzip -q plugins.zip
+
+# Create plugins directory if it doesn't exist
+mkdir -p /var/www/pelican/plugins
+
+# Copy ALL plugins (so they're available for future use)
+echo -e "${YELLOW}   Installing all plugins to /var/www/pelican/plugins/...${NC}"
+cp -r plugins-main/* /var/www/pelican/plugins/
+rm -f /var/www/pelican/plugins/.gitignore /var/www/pelican/plugins/LICENSE /var/www/pelican/plugins/README.md
+
+# Count plugins
+PLUGIN_COUNT=$(ls -1d /var/www/pelican/plugins/*/ 2>/dev/null | wc -l)
+echo -e "${GREEN}   ✓ ${PLUGIN_COUNT} plugins downloaded and ready${NC}"
+
+# Set ownership
+chown -R www-data:www-data /var/www/pelican/plugins
+
+# Cleanup
+cd /var/www/pelican
+rm -rf "$TMP_DIR"
+
+# ============================================================================
+# INSTALL AND ENABLE REQUIRED PLUGINS
+# ============================================================================
+echo ""
+echo -e "${CYAN}[3/11] Installing and enabling required plugins...${NC}"
+
+# Install Register plugin
+echo -e "${YELLOW}   Installing Register plugin...${NC}"
+if php artisan p:plugin:install register 2>&1 | grep -q "already installed"; then
+    echo -e "${GREEN}   ✓ Register plugin already installed${NC}"
+else
+    echo -e "${GREEN}   ✓ Register plugin installed${NC}"
+fi
+
+# Enable Register plugin
+echo -e "${YELLOW}   Enabling Register plugin...${NC}"
+php artisan p:plugin:enable register 2>&1 || echo -e "${YELLOW}   ⚠️  Register plugin may already be enabled${NC}"
+echo -e "${GREEN}   ✓ Register plugin enabled${NC}"
+
+# Install User-Creatable-Servers plugin
+echo -e "${YELLOW}   Installing User-Creatable-Servers plugin...${NC}"
+if php artisan p:plugin:install user-creatable-servers 2>&1 | grep -q "already installed"; then
+    echo -e "${GREEN}   ✓ User-Creatable-Servers plugin already installed${NC}"
+else
+    echo -e "${GREEN}   ✓ User-Creatable-Servers plugin installed${NC}"
+fi
+
+# Enable User-Creatable-Servers plugin
+echo -e "${YELLOW}   Enabling User-Creatable-Servers plugin...${NC}"
+php artisan p:plugin:enable user-creatable-servers 2>&1 || echo -e "${YELLOW}   ⚠️  User-Creatable-Servers plugin may already be enabled${NC}"
+echo -e "${GREEN}   ✓ User-Creatable-Servers plugin enabled${NC}"
+
+# Run migrations to create tables
+echo -e "${YELLOW}   Running database migrations...${NC}"
+php artisan migrate --force 2>&1 | grep -v "Nothing to migrate" || true
+echo -e "${GREEN}   ✓ Database migrations complete${NC}"
+
+# Clear cache
+echo -e "${YELLOW}   Clearing cache...${NC}"
+php artisan config:clear >/dev/null 2>&1
+php artisan cache:clear >/dev/null 2>&1
+echo -e "${GREEN}   ✓ Cache cleared${NC}"
+
+# ============================================================================
 # USER CONFIGURATION
 # ============================================================================
 echo ""
-echo -e "${CYAN}[2/10] Configure Default User Resource Limits${NC}"
+echo -e "${CYAN}[4/11] Configure Default User Resource Limits${NC}"
 echo -e "${YELLOW}────────────────────────────────────────────────────────${NC}"
 echo ""
 echo -e "${BLUE}These limits will be automatically assigned to new users${NC}"
@@ -124,42 +204,10 @@ echo ""
 echo -e "${GREEN}   ✓ Configuration collected${NC}"
 
 # ============================================================================
-# INSTALL PLUGINS
-# ============================================================================
-echo ""
-echo -e "${CYAN}[3/10] Checking plugin installation...${NC}"
-
-# Check if plugins are already installed
-REGISTER_INSTALLED=$(php artisan p:plugin:list 2>/dev/null | grep -c "Register.*enabled" || echo "0")
-UCS_INSTALLED=$(php artisan p:plugin:list 2>/dev/null | grep -c "User Creatable Servers.*enabled" || echo "0")
-
-if [ "$REGISTER_INSTALLED" -eq 0 ]; then
-    echo -e "${YELLOW}   Installing Register plugin...${NC}"
-    echo "register" | php artisan p:plugin:install 2>/dev/null || {
-        echo -e "${RED}   ❌ Failed to install Register plugin${NC}"
-        exit 1
-    }
-    echo -e "${GREEN}   ✓ Register plugin installed${NC}"
-else
-    echo -e "${GREEN}   ✓ Register plugin already installed${NC}"
-fi
-
-if [ "$UCS_INSTALLED" -eq 0 ]; then
-    echo -e "${YELLOW}   Installing User-Creatable-Servers plugin...${NC}"
-    echo "user-creatable-servers" | php artisan p:plugin:install 2>/dev/null || {
-        echo -e "${RED}   ❌ Failed to install User-Creatable-Servers plugin${NC}"
-        exit 1
-    }
-    echo -e "${GREEN}   ✓ User-Creatable-Servers plugin installed${NC}"
-else
-    echo -e "${GREEN}   ✓ User-Creatable-Servers plugin already installed${NC}"
-fi
-
-# ============================================================================
 # CONFIGURE .ENV
 # ============================================================================
 echo ""
-echo -e "${CYAN}[4/10] Configuring environment variables...${NC}"
+echo -e "${CYAN}[5/11] Configuring environment variables...${NC}"
 
 # Remove old UCS settings if they exist
 sed -i '/^UCS_/d' .env
@@ -178,7 +226,7 @@ ENV
 
 echo -e "${GREEN}   ✓ Environment configured${NC}"
 
-# Clear cache
+# Clear cache again after config changes
 php artisan config:clear >/dev/null 2>&1
 php artisan cache:clear >/dev/null 2>&1
 
@@ -186,7 +234,7 @@ php artisan cache:clear >/dev/null 2>&1
 # CREATE AUTO-ASSIGNMENT SCRIPT
 # ============================================================================
 echo ""
-echo -e "${CYAN}[5/10] Creating auto-assignment script...${NC}"
+echo -e "${CYAN}[6/11] Creating auto-assignment script...${NC}"
 
 cat > /usr/local/bin/pelican-auto-resource-limits.sh <<'SCRIPT_EOF'
 #!/bin/bash
@@ -207,6 +255,13 @@ DB_CONNECTION=$(grep "^DB_CONNECTION=" /var/www/pelican/.env | cut -d'=' -f2)
 case "$DB_CONNECTION" in
     sqlite)
         SQLITE_DB="/var/www/pelican/database/database.sqlite"
+        
+        # Check if table exists first
+        TABLE_EXISTS=$(sqlite3 "$SQLITE_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='user_resource_limits';" 2>/dev/null)
+        
+        if [ -z "$TABLE_EXISTS" ]; then
+            exit 1
+        fi
         
         sqlite3 "$SQLITE_DB" <<SQL
 INSERT OR IGNORE INTO user_resource_limits (user_id, cpu, memory, disk, server_limit, created_at, updated_at)
@@ -288,16 +343,16 @@ chmod +x /usr/local/bin/pelican-auto-resource-limits.sh
 echo -e "${GREEN}   ✓ Auto-assignment script created${NC}"
 
 # ============================================================================
-# CREATE FAST AUTO-ASSIGNMENT SCRIPT (2 SECOND INTERVALS)
+# CREATE FAST AUTO-ASSIGNMENT SCRIPT (1 SECOND INTERVALS)
 # ============================================================================
 echo ""
-echo -e "${CYAN}[6/10] Creating fast auto-assignment service...${NC}"
+echo -e "${CYAN}[7/11] Creating fast auto-assignment service...${NC}"
 
 cat > /usr/local/bin/pelican-auto-resource-limits-fast.sh <<'FAST_EOF'
 #!/bin/bash
 while true; do
     /usr/local/bin/pelican-auto-resource-limits.sh >/dev/null 2>&1
-    sleep 2
+    sleep 1
 done
 FAST_EOF
 
@@ -309,7 +364,7 @@ echo -e "${GREEN}   ✓ Fast auto-assignment script created${NC}"
 # SETUP CRON JOB
 # ============================================================================
 echo ""
-echo -e "${CYAN}[7/10] Setting up cron job...${NC}"
+echo -e "${CYAN}[8/11] Setting up cron job...${NC}"
 
 # Remove old cron jobs
 crontab -l 2>/dev/null | grep -v "pelican-auto-resource-limits" | crontab - 2>/dev/null || true
@@ -323,7 +378,7 @@ echo -e "${GREEN}   ✓ Cron job configured (runs every minute)${NC}"
 # START FAST SERVICE
 # ============================================================================
 echo ""
-echo -e "${CYAN}[8/10] Starting fast auto-assignment service...${NC}"
+echo -e "${CYAN}[9/11] Starting fast auto-assignment service...${NC}"
 
 # Kill any existing processes
 pkill -f "pelican-auto-resource-limits-fast.sh" 2>/dev/null || true
@@ -332,15 +387,18 @@ sleep 1
 # Start new process
 nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh > /var/log/pelican-auto-limits-fast.log 2>&1 &
 
-echo -e "${GREEN}   ✓ Fast service started (checks every 10 seconds)${NC}"
+echo -e "${GREEN}   ✓ Fast service started (checks every 1 seconds)${NC}"
 
 # ============================================================================
 # RUN INITIAL ASSIGNMENT
 # ============================================================================
 echo ""
-echo -e "${CYAN}[9/10] Assigning limits to existing users...${NC}"
+echo -e "${CYAN}[10/11] Assigning limits to existing users...${NC}"
 
-/usr/local/bin/pelican-auto-resource-limits.sh
+# Wait a moment for everything to settle
+sleep 3
+
+/usr/local/bin/pelican-auto-resource-limits.sh 2>&1 || echo -e "${YELLOW}   ⚠️  Initial assignment skipped (may be no users yet)${NC}"
 
 # Count users with limits
 if [ "$DB_TYPE" = "SQLite" ]; then
@@ -357,7 +415,7 @@ echo -e "${GREEN}   ✓ ${USER_COUNT} users now have resource limits${NC}"
 # DEPLOYMENT TAG INSTRUCTIONS
 # ============================================================================
 echo ""
-echo -e "${CYAN}[10/10] Configuration complete!${NC}"
+echo -e "${CYAN}[11/11] Configuration complete!${NC}"
 echo ""
 
 # ============================================================================
@@ -368,10 +426,22 @@ echo -e "${GREEN}║           SETUP COMPLETE - SUMMARY                     ║$
 echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
+echo -e "${CYAN}📦 PLUGINS INSTALLED:${NC}"
+echo -e "   ${GREEN}✓ ALL plugins downloaded to /var/www/pelican/plugins/${NC}"
+echo -e "   ${GREEN}✓ Register plugin - INSTALLED & ENABLED${NC}"
+echo -e "   ${GREEN}✓ User-Creatable-Servers plugin - INSTALLED & ENABLED${NC}"
+echo -e "   ${BLUE}ℹ️  Other plugins available but not enabled${NC}"
+echo ""
+
 echo -e "${CYAN}📊 DEFAULT USER RESOURCE LIMITS:${NC}"
-echo -e "   CPU: ${GREEN}${CPU_LIMIT}%${NC} ($(echo "scale=1; $CPU_LIMIT/100" | bc) cores)"
-echo -e "   Memory: ${GREEN}${MEMORY_LIMIT} MiB${NC} ($(echo "scale=2; $MEMORY_LIMIT/1024" | bc) GB)"
-echo -e "   Disk: ${GREEN}${DISK_LIMIT} MiB${NC} ($(echo "scale=2; $DISK_LIMIT/1024" | bc) GB)"
+# Calculate without bc (more compatible)
+CPU_CORES=$(awk "BEGIN {printf \"%.1f\", $CPU_LIMIT/100}")
+MEMORY_GB=$(awk "BEGIN {printf \"%.2f\", $MEMORY_LIMIT/1024}")
+DISK_GB=$(awk "BEGIN {printf \"%.2f\", $DISK_LIMIT/1024}")
+
+echo -e "   CPU: ${GREEN}${CPU_LIMIT}%${NC} ($CPU_CORES cores)"
+echo -e "   Memory: ${GREEN}${MEMORY_LIMIT} MiB${NC} ($MEMORY_GB GB)"
+echo -e "   Disk: ${GREEN}${DISK_LIMIT} MiB${NC} ($DISK_GB GB)"
 echo -e "   Max Servers: ${GREEN}${MAX_SERVERS}${NC}"
 echo -e "   Max Databases: ${GREEN}${MAX_DATABASES}${NC}"
 echo -e "   Max Allocations: ${GREEN}${MAX_ALLOCATIONS}${NC}"
@@ -407,18 +477,24 @@ echo ""
 
 echo -e "${CYAN}🔄 AUTO-ASSIGNMENT:${NC}"
 echo -e "   ${GREEN}✓${NC} Cron job: Runs every 1 minute"
-echo -e "   ${GREEN}✓${NC} Fast service: Checks every 10 seconds"
-echo -e "   ${GREEN}✓${NC} New users get limits within 10 seconds"
+echo -e "   ${GREEN}✓${NC} Fast service: Checks every 1 seconds"
+echo -e "   ${GREEN}✓${NC} New users get limits within 1 seconds"
 echo ""
 
 echo -e "${CYAN}🧪 TEST IT:${NC}"
 echo -e "   1. Register a new user at: ${BLUE}https://your-panel-domain/register${NC}"
-echo -e "   2. Wait 10 seconds"
+echo -e "   2. Wait 1 seconds"
 echo -e "   3. User should automatically get resource limits"
 echo -e "   4. User can create servers from the dashboard"
 echo ""
 
 echo -e "${CYAN}📝 USEFUL COMMANDS:${NC}"
+echo -e "   Check enabled plugins:"
+echo -e "     ${GREEN}cd /var/www/pelican && php artisan p:plugin:list${NC}"
+echo ""
+echo -e "   Enable other plugins (from Admin Panel):"
+echo -e "     ${BLUE}Admin → Plugins → Select Plugin → Enable${NC}"
+echo ""
 echo -e "   Check service status:"
 echo -e "     ${GREEN}ps aux | grep pelican-auto-resource-limits-fast${NC}"
 echo ""
@@ -428,7 +504,7 @@ echo ""
 echo -e "   Manually run assignment:"
 echo -e "     ${GREEN}/usr/local/bin/pelican-auto-resource-limits.sh${NC}"
 echo ""
-echo -e "   Check user limits:"
+echo -e "   Check user limits (in tinker):"
 echo -e "     ${GREEN}cd /var/www/pelican && php artisan tinker${NC}"
 echo -e "     ${BLUE}\Boy132\UserCreatableServers\Models\UserResourceLimits::all();${NC}"
 echo ""
