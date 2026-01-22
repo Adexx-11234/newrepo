@@ -494,6 +494,39 @@ QEOF
 fi
 
 if [ "$HAS_SYSTEMD" = false ]; then
+    echo -e "${YELLOW}   Using supervisor (container mode)...${NC}"
+    
+    # Install supervisor if not present
+    apt install -y supervisor 2>/dev/null || true
+    
+    # Create main supervisord config if it doesn't exist
+    if [ ! -f /etc/supervisor/supervisord.conf ]; then
+        cat > /etc/supervisor/supervisord.conf <<'SEOF'
+[unix_http_server]
+file=/var/run/supervisor.sock
+chmod=0700
+
+[supervisord]
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+childlogdir=/var/log/supervisor
+nodaemon=false
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[supervisorctl]
+serverurl=unix:///var/run/supervisor.sock
+
+[include]
+files = /etc/supervisor/conf.d/*.conf
+SEOF
+    fi
+    
+    # Create log directory
+    mkdir -p /var/log/supervisor
+    
+    # Create pelican queue worker config
     mkdir -p /etc/supervisor/conf.d
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
 [program:pelican-queue]
@@ -504,16 +537,41 @@ autostart=true
 autorestart=true
 stdout_logfile=/var/log/pelican-queue.log
 stderr_logfile=/var/log/pelican-queue-error.log
+stopasgroup=true
+killasgroup=true
 QEOF
 
-    service supervisor restart 2>/dev/null || supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
+    # Kill any existing supervisor
+    pkill supervisord 2>/dev/null || true
     sleep 1
-    supervisorctl reread 2>/dev/null || true
-    supervisorctl update 2>/dev/null || true
-    supervisorctl start pelican-queue 2>/dev/null || true
+    
+    # Start supervisord
+    echo -e "${BLUE}   Starting supervisord...${NC}"
+    supervisord -c /etc/supervisor/supervisord.conf
+    sleep 2
+    
+    # Load and start the queue worker
+    supervisorctl reread
+    supervisorctl update
+    supervisorctl start pelican-queue
+    
+    # Verify it's running
+    if supervisorctl status pelican-queue | grep -q RUNNING; then
+        echo -e "${GREEN}   ✓ Queue worker started via supervisor${NC}"
+    else
+        echo -e "${RED}   ❌ Queue worker failed to start!${NC}"
+        supervisorctl status pelican-queue
+    fi
 fi
 
-echo -e "${GREEN}   ✓ Queue worker configured${NC}"
+# Verify queue worker is running (either systemd or supervisor)
+sleep 1
+if ps aux | grep -v grep | grep -q "queue:work"; then
+    echo -e "${GREEN}   ✓ Queue worker is running${NC}"
+else
+    echo -e "${RED}   ⚠ Queue worker not detected!${NC}"
+    echo -e "${YELLOW}   Jobs will queue but not process automatically${NC}"
+fi
 
 # ============================================================================
 # SETUP CRON
