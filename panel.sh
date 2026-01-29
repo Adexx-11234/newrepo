@@ -479,7 +479,7 @@ After=redis-server.service
 User=www-data
 Group=www-data
 Restart=always
-ExecStart=/usr/bin/php /var/www/pelican/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+ExecStart=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90
 StartLimitInterval=180
 StartLimitBurst=30
 RestartSec=5s
@@ -530,7 +530,7 @@ SEOF
     mkdir -p /etc/supervisor/conf.d
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
 [program:pelican-queue]
-command=/usr/bin/php /var/www/pelican/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+command=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90
 directory=/var/www/pelican
 user=www-data
 autostart=true
@@ -539,6 +539,8 @@ stdout_logfile=/var/log/pelican-queue.log
 stderr_logfile=/var/log/pelican-queue-error.log
 stopasgroup=true
 killasgroup=true
+startsecs=5
+startretries=3
 QEOF
 
     # Kill any existing supervisor
@@ -572,7 +574,6 @@ else
     echo -e "${RED}   ⚠ Queue worker not detected!${NC}"
     echo -e "${YELLOW}   Jobs will queue but not process automatically${NC}"
 fi
-
 # ============================================================================
 # SETUP CRON
 # ============================================================================
