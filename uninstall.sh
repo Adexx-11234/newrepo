@@ -20,8 +20,9 @@ echo -e "${RED}========================================${NC}"
 echo ""
 
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}This script must be run as root${NC}" 
-   exit 1
+   echo -e "${YELLOW}Switching to root...${NC}"
+   sudo "$0" "$@"
+   exit $?
 fi
 
 echo -e "${YELLOW}This will permanently delete:${NC}"
