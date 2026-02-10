@@ -413,6 +413,7 @@ MAIL_FROM_NAME="${MAIL_FROM_NAME}"
 APP_URL=https://${PANEL_DOMAIN}
 APP_TIMEZONE=UTC
 APP_LOCALE=en
+APP_INSTALLED=false
 ENVEOF
 
 # Add PostgreSQL-specific settings if needed
@@ -550,86 +551,75 @@ echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
 # ============================================================================
 echo -e "${CYAN}[14/20] Running database migrations...${NC}"
 
-# FIX: PostgreSQL boolean compatibility
+# Check if database already has tables
+DB_HAS_DATA=false
 if [ "$DB_DRIVER" = "pgsql" ]; then
-    echo -e "${BLUE}   Applying PostgreSQL boolean fixes...${NC}"
-    
-    # Create migration file
-    TIMESTAMP=$(date +%Y_%m_%d_%H%M%S)
-    MIGRATION_FILE="database/migrations/${TIMESTAMP}_fix_schedule_booleans.php"
-    
-    cat > "$MIGRATION_FILE" << 'MIGEOF'
-<?php
-use Illuminate\Database\Migrations\Migration;
-use Illuminate\Support\Facades\DB;
-
-return new class extends Migration {
-    public function up(): void {
-        if (DB::getDriverName() === 'pgsql') {
-            DB::statement('ALTER TABLE schedules ALTER COLUMN is_active TYPE smallint USING (is_active::int)');
-            DB::statement('ALTER TABLE schedules ALTER COLUMN is_processing TYPE smallint USING (is_processing::int)');
-            DB::statement('ALTER TABLE schedules ALTER COLUMN only_when_online TYPE smallint USING (only_when_online::int)');
-        }
-    }
-    
-    public function down(): void {
-        if (DB::getDriverName() === 'pgsql') {
-            DB::statement('ALTER TABLE schedules ALTER COLUMN is_active TYPE boolean USING (is_active::boolean)');
-            DB::statement('ALTER TABLE schedules ALTER COLUMN is_processing TYPE boolean USING (is_processing::boolean)');
-            DB::statement('ALTER TABLE schedules ALTER COLUMN only_when_online TYPE boolean USING (only_when_online::boolean)');
-        }
-    }
-};
-MIGEOF
-    
-    echo -e "${GREEN}   ✓ PostgreSQL boolean migration created${NC}"
+    TABLE_COUNT=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" 2>/dev/null || echo "0")
+else
+    TABLE_COUNT=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';" 2>/dev/null || echo "0")
 fi
 
-if [ -f "/var/www/pelican/.installation_complete" ]; then
-    echo -e "${YELLOW}   ⚠ Existing installation detected${NC}"
-    read -p "   Use migrate:fresh? This will DELETE ALL DATA! (yes/NO): " CONFIRM_FRESH
+if [ "$TABLE_COUNT" -gt 5 ]; then
+    DB_HAS_DATA=true
+    echo -e "${YELLOW}   ⚠ Database contains $TABLE_COUNT tables${NC}"
+fi
+
+# Determine migration strategy
+if [ "$DB_HAS_DATA" = true ]; then
+    echo -e "${RED}   ⚠️  WARNING: Existing database detected!${NC}"
+    echo ""
+    echo -e "   Choose migration strategy:"
+    echo -e "   1) ${GREEN}migrate${NC} - Update schema (keeps data)"
+    echo -e "   2) ${RED}migrate:fresh${NC} - DELETE ALL DATA and start fresh"
+    echo ""
+    read -p "   Your choice (1/2) [1]: " MIGRATION_CHOICE
+    MIGRATION_CHOICE=${MIGRATION_CHOICE:-1}
     
-    if [ "$CONFIRM_FRESH" = "yes" ]; then
-        echo -e "${RED}   🗑️  Dropping all tables...${NC}"
-        $PHP_BIN artisan migrate:fresh --force || {
-            echo -e "${RED}   ❌ Migration failed!${NC}"
-            exit 1
-        }
-        echo -e "${GREEN}   ✓ Database reset complete${NC}"
+    if [ "$MIGRATION_CHOICE" = "2" ]; then
+        read -p "   Type 'DELETE ALL DATA' to confirm: " CONFIRM_DELETE
+        if [ "$CONFIRM_DELETE" = "DELETE ALL DATA" ]; then
+            echo -e "${RED}   🗑️  Dropping all tables...${NC}"
+            $PHP_BIN artisan migrate:fresh --force
+        else
+            echo -e "${GREEN}   Cancelled. Running safe migration...${NC}"
+            $PHP_BIN artisan migrate --force
+        fi
     else
-        $PHP_BIN artisan migrate --force || {
-            echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
-        }
-        echo -e "${GREEN}   ✓ Database updated${NC}"
+        echo -e "${GREEN}   Running safe migration...${NC}"
+        $PHP_BIN artisan migrate --force
     fi
 else
-    echo -e "${BLUE}   Fresh installation...${NC}"
-    /usr/bin/php8.3 artisan migrate:fresh --force || {
-        echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
-    }
-    touch /var/www/pelican/.installation_complete
-    echo -e "${GREEN}   ✓ Database initialized${NC}"
-fi
-
-# FIX: Update Schedule model for PostgreSQL integer booleans
-if [ "$DB_DRIVER" = "pgsql" ]; then
-    echo -e "${BLUE}   Updating Schedule model for PostgreSQL...${NC}"
+    echo -e "${BLUE}   Fresh installation (empty database)...${NC}"
+    read -p "   Run migrate:fresh? (y/n) [y]: " CONFIRM_FRESH_NEW
+    CONFIRM_FRESH_NEW=${CONFIRM_FRESH_NEW:-y}
     
-    # Check if the model file exists
-    if [ -f "app/Models/Schedule.php" ]; then
-        sed -i "s/'is_active' => 'boolean'/'is_active' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
-        sed -i "s/'is_processing' => 'boolean'/'is_processing' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
-        sed -i "s/'only_when_online' => 'boolean'/'only_when_online' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
-        echo -e "${GREEN}   ✓ Schedule model updated${NC}"
+    if [[ "$CONFIRM_FRESH_NEW" =~ ^[Yy] ]]; then
+        $PHP_BIN artisan migrate:fresh --force
     else
-        echo -e "${YELLOW}   ⚠ Schedule model not found (will be handled by panel)${NC}"
+        $PHP_BIN artisan migrate --force
     fi
 fi
 
+echo -e "${GREEN}   ✓ Database migration complete${NC}"
+
 # ============================================================================
-# SETUP QUEUE WORKER (FIXED: Use system PHP for supervisor)
+# SETUP QUEUE WORKER (FIXED: Proper restart handling)
 # ============================================================================
 echo -e "${CYAN}[15/20] Setting up queue worker...${NC}"
+
+# CRITICAL: Kill any existing queue workers first
+echo -e "${BLUE}   Stopping existing queue workers...${NC}"
+supervisorctl stop pelican-queue 2>/dev/null || true
+pkill -9 -f "artisan queue:work" 2>/dev/null || true
+pkill -9 -f "pelican-queue" 2>/dev/null || true
+sleep 2
+
+# Verify they're dead
+if ps aux | grep -v grep | grep -q "queue:work"; then
+    echo -e "${YELLOW}   ⚠ Force killing stubborn processes...${NC}"
+    pkill -9 -f "queue:work"
+    sleep 1
+fi
 
 if [ "$HAS_SYSTEMD" = true ]; then
     cat > /etc/systemd/system/pelican-queue.service <<'QEOF'
@@ -641,7 +631,7 @@ After=redis-server.service
 User=www-data
 Group=www-data
 Restart=always
-ExecStart=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90
+ExecStart=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90 --max-jobs=1000
 StartLimitInterval=180
 StartLimitBurst=30
 RestartSec=5s
@@ -652,7 +642,7 @@ QEOF
 
     systemctl daemon-reload
     systemctl enable pelican-queue.service 2>/dev/null || true
-    systemctl start pelican-queue.service 2>/dev/null || HAS_SYSTEMD=false
+    systemctl restart pelican-queue.service 2>/dev/null || HAS_SYSTEMD=false
 fi
 
 if [ "$HAS_SYSTEMD" = false ]; then
@@ -686,47 +676,78 @@ SEOF
     mkdir -p /var/log/supervisor
     mkdir -p /etc/supervisor/conf.d
     
-    # FIXED: Use system PHP (/usr/bin/php8.3) which has working extensions
+    # IMPROVED: Better queue worker config
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
 [program:pelican-queue]
-command=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90
+command=/usr/bin/php8.3 /var/www/pelican/artisan queue:work redis --sleep=3 --tries=3 --timeout=90 --max-jobs=1000
 directory=/var/www/pelican
 user=www-data
 autostart=true
 autorestart=true
 stdout_logfile=/var/log/pelican-queue.log
 stderr_logfile=/var/log/pelican-queue-error.log
+stdout_logfile_maxbytes=10MB
+stderr_logfile_maxbytes=10MB
 stopasgroup=true
 killasgroup=true
 startsecs=5
-startretries=3
+startretries=10
+priority=999
 QEOF
 
+    # Ensure supervisor is completely restarted
+    echo -e "${BLUE}   Restarting supervisord completely...${NC}"
     pkill supervisord 2>/dev/null || true
-    sleep 1
-    
-    echo -e "${BLUE}   Starting supervisord...${NC}"
-    supervisord -c /etc/supervisor/supervisord.conf
     sleep 2
     
+    supervisord -c /etc/supervisor/supervisord.conf
+    sleep 3
+    
+    # Force reload and restart
     supervisorctl reread
     supervisorctl update
+    supervisorctl stop pelican-queue 2>/dev/null || true
+    sleep 1
     supervisorctl start pelican-queue
     
-    sleep 2
-    if supervisorctl status pelican-queue | grep -q RUNNING; then
-        echo -e "${GREEN}   ✓ Queue worker started via supervisor${NC}"
+    sleep 3
+    
+    # Detailed status check
+    QUEUE_STATUS=$(supervisorctl status pelican-queue 2>&1)
+    echo -e "${BLUE}   Status: $QUEUE_STATUS${NC}"
+    
+    if echo "$QUEUE_STATUS" | grep -q "RUNNING"; then
+        echo -e "${GREEN}   ✓ Queue worker started successfully${NC}"
+        
+        # Show actual process
+        QUEUE_PID=$(echo "$QUEUE_STATUS" | grep -oP 'pid \K[0-9]+')
+        if [ -n "$QUEUE_PID" ]; then
+            echo -e "${GREEN}   ✓ Worker PID: $QUEUE_PID${NC}"
+        fi
     else
-        echo -e "${YELLOW}   ⚠ Queue worker status uncertain${NC}"
+        echo -e "${RED}   ❌ Queue worker failed to start!${NC}"
+        echo -e "${YELLOW}   Check logs: tail -50 /var/log/pelican-queue-error.log${NC}"
     fi
 fi
 
-# Verify queue worker
-sleep 1
-if ps aux | grep -v grep | grep -q "queue:work"; then
-    echo -e "${GREEN}   ✓ Queue worker is running${NC}"
+# Final verification with actual process check
+sleep 2
+if ps aux | grep -v grep | grep "queue:work" | head -1; then
+    echo -e "${GREEN}   ✓ Queue worker confirmed running${NC}"
+    
+    # Test queue connectivity
+    echo -e "${BLUE}   Testing queue connection...${NC}"
+    cd /var/www/pelican
+    QUEUE_TEST=$(/usr/bin/php8.3 artisan queue:work --once --stop-when-empty 2>&1)
+    if echo "$QUEUE_TEST" | grep -qi "error\|exception\|failed"; then
+        echo -e "${RED}   ❌ Queue test failed:${NC}"
+        echo "$QUEUE_TEST" | tail -5
+    else
+        echo -e "${GREEN}   ✓ Queue connection working${NC}"
+    fi
 else
-    echo -e "${YELLOW}   ⚠ Queue worker not detected${NC}"
+    echo -e "${RED}   ❌ Queue worker NOT running!${NC}"
+    echo -e "${YELLOW}   Manual start: supervisorctl start pelican-queue${NC}"
 fi
 
 # ============================================================================
