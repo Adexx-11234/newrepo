@@ -1,9 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v3.0 - ALL ISSUES FIXED
+# PELICAN AUTO-RESTART SCRIPT v4.0 - ALL ISSUES FIXED
 # For GitHub Codespaces & VPS - Starts everything after sleep/restart
-# FIXES: PHP-FPM port 9000, proper detection, cache clearing
+# FIXES: PHP-FPM port 9000, .pelican.env loading, cache clearing, PostgreSQL
 ################################################################################
 
 RED='\033[0;31m'
@@ -14,7 +14,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v3.0      ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v4.0      ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -24,12 +24,30 @@ if [[ $EUID -ne 0 ]]; then
    exit $?
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.pelican.env"
+# Find .pelican.env file
+ENV_FILE=""
+for location in \
+    "$(pwd)/.pelican.env" \
+    "/workspaces/null/newrepo/.pelican.env" \
+    "/root/.pelican.env" \
+    "$HOME/.pelican.env" \
+    "$(dirname "$0")/.pelican.env"; do
+    if [ -f "$location" ]; then
+        ENV_FILE="$location"
+        break
+    fi
+done
 
 # Load config if exists
-if [ -f "$ENV_FILE" ]; then
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
+    echo -e "${GREEN}✓ Config loaded: $ENV_FILE${NC}"
+    echo -e "${BLUE}  Domain: ${PANEL_DOMAIN:-not set}${NC}"
+    echo -e "${BLUE}  Database: ${DB_DRIVER:-not set}${NC}"
+    echo ""
+else
+    echo -e "${YELLOW}⚠ No .pelican.env found - will use defaults${NC}"
+    echo ""
 fi
 
 # Force system PHP path
@@ -219,8 +237,9 @@ else
         pkill -f "queue:work" 2>/dev/null || true
         sleep 1
         
-        # Use system PHP
+        # CRITICAL: Use system PHP (/usr/bin/php8.3) not custom PHP
         PHP_BIN="/usr/bin/php${PHP_VERSION}"
+        [ ! -f "$PHP_BIN" ] && PHP_BIN="/usr/bin/php8.3"
         [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
         
         nohup sudo -u www-data $PHP_BIN artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
@@ -258,11 +277,12 @@ else
         if pgrep -x wings >/dev/null; then
             echo -e "${GREEN}   ✓ Wings started${NC}"
             
-            # Verify port
+            # Verify port 8080 (not 443 or 8443!)
             if netstat -tulpn 2>/dev/null | grep -q ":8080"; then
                 echo -e "${GREEN}   ✓ Wings listening on port 8080${NC}"
             else
                 echo -e "${YELLOW}   ⚠ Wings not on port 8080${NC}"
+                echo -e "${YELLOW}   Check /etc/pelican/config.yml${NC}"
             fi
         else
             echo -e "${RED}   ✗ Wings failed to start${NC}"
@@ -286,7 +306,7 @@ TUNNEL_COUNT=0
 
 # Panel Tunnel
 if [ -n "$CF_TOKEN" ]; then
-    echo -e "${YELLOW}   Starting Panel tunnel...${NC}"
+    echo -e "${YELLOW}   Starting Panel tunnel (port 8443)...${NC}"
     nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
     sleep 2
     ((TUNNEL_COUNT++))
@@ -294,7 +314,7 @@ fi
 
 # Wings Tunnel (if token exists in env)
 if [ -n "$CF_TOKEN_WINGS" ]; then
-    echo -e "${YELLOW}   Starting Wings tunnel...${NC}"
+    echo -e "${YELLOW}   Starting Wings tunnel (port 8080)...${NC}"
     nohup cloudflared tunnel run --token "$CF_TOKEN_WINGS" > /var/log/cloudflared-wings.log 2>&1 &
     sleep 2
     ((TUNNEL_COUNT++))
@@ -303,24 +323,38 @@ fi
 if [ "$TUNNEL_COUNT" -gt 0 ]; then
     echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}"
 else
-    echo -e "${YELLOW}   ⚠ No tunnel tokens found${NC}"
+    echo -e "${YELLOW}   ⚠ No tunnel tokens found in .pelican.env${NC}"
 fi
 
 # ============================================================================
-# CLEAR PANEL CACHE (FIX TOKEN_ID ISSUES)
+# CLEAR PANEL CACHE (FIX TOKEN_ID & PostgreSQL ISSUES)
 # ============================================================================
 if [ -d "/var/www/pelican" ]; then
     echo ""
     echo -e "${CYAN}[BONUS] Clearing Panel cache...${NC}"
     
     cd /var/www/pelican
+    
+    # CRITICAL: Use system PHP
     PHP_BIN="/usr/bin/php${PHP_VERSION}"
+    [ ! -f "$PHP_BIN" ] && PHP_BIN="/usr/bin/php8.3"
     [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
     
     $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
+    
+    # If PostgreSQL, check for boolean migration issues
+    if [ "$DB_DRIVER" = "pgsql" ]; then
+        echo -e "${BLUE}   Checking PostgreSQL health...${NC}"
+        DB_TEST=$($PHP_BIN artisan tinker --execute="echo DB::connection()->getDatabaseName();" 2>&1 | tail -1)
+        if echo "$DB_TEST" | grep -q "postgres\|$DB_NAME"; then
+            echo -e "${GREEN}   ✓ PostgreSQL connection healthy${NC}"
+        else
+            echo -e "${YELLOW}   ⚠ PostgreSQL connection issue${NC}"
+        fi
+    fi
     
     echo -e "${GREEN}   ✓ Panel cache cleared${NC}"
     echo -e "${YELLOW}   ⚠ IMPORTANT: Hard refresh browser (Ctrl+Shift+R)${NC}"
@@ -457,6 +491,11 @@ if [ "$CRITICAL_OK" -ge 5 ]; then
     if [ -n "$NODE_DOMAIN" ]; then
         echo -e "${CYAN}🌐 Wings URL:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
     fi
+    
+    # Show database info if available
+    if [ -n "$DB_DRIVER" ]; then
+        echo -e "${CYAN}💾 Database:${NC} ${GREEN}${DB_DRIVER}${NC} @ ${GREEN}${DB_HOST}:${DB_PORT}${NC}"
+    fi
 else
     echo -e "${RED}❌ Some services failed ($CRITICAL_OK/5 running)${NC}"
     echo ""
@@ -474,6 +513,13 @@ else
     if ! netstat -tulpn 2>/dev/null | grep -q ":8443"; then
         echo -e "${RED}  ✗ Nginx not on port 8443${NC}"
         echo -e "${YELLOW}    Check: /etc/nginx/sites-available/pelican.conf${NC}"
+    fi
+    
+    # Wings port check
+    if pgrep -x wings >/dev/null && ! netstat -tulpn 2>/dev/null | grep -q ":8080"; then
+        echo -e "${RED}  ✗ Wings not on port 8080 (should not be 443/8443!)${NC}"
+        echo -e "${YELLOW}    Check: /etc/pelican/config.yml${NC}"
+        echo -e "${YELLOW}    Port should be: 8080${NC}"
     fi
     
     # Docker DNS check
@@ -496,11 +542,14 @@ echo -e "  • Queue logs:             ${GREEN}tail -f /var/log/pelican-queue.lo
 echo -e "  • Wings logs:             ${GREEN}tail -f /tmp/wings.log${NC}"
 echo -e "  • Docker logs:            ${GREEN}tail -f /var/log/docker.log${NC}"
 echo -e "  • Check all ports:        ${GREEN}netstat -tulpn | grep -E '9000|8443|8080|6379'${NC}"
-echo -e "  • Clear Panel cache:      ${GREEN}cd /var/www/pelican && php artisan cache:clear${NC}"
+echo -e "  • Clear Panel cache:      ${GREEN}cd /var/www/pelican && /usr/bin/php8.3 artisan cache:clear${NC}"
+if [ -n "$ENV_FILE" ]; then
+    echo -e "  • View config:            ${GREEN}cat $ENV_FILE${NC}"
+fi
 echo ""
 
 # Save to crontab for auto-restart
-if ! crontab -l 2>/dev/null | grep -q "start-wings.sh"; then
+if ! crontab -l 2>/dev/null | grep -q "$(basename $0)"; then
     echo -e "${CYAN}💡 TIP: Add to crontab for auto-restart on reboot:${NC}"
     echo -e "   ${GREEN}(crontab -l 2>/dev/null; echo '@reboot sleep 30 && $0') | crontab -${NC}"
     echo ""
