@@ -53,7 +53,6 @@ print_banner
 # ============================================================
 print_step "Checking root password..."
 
-# Check if root has a password set
 if passwd -S root | grep -q "^root P"; then
     print_success "Root password is already set. Using existing password."
 else
@@ -72,7 +71,7 @@ fi
 # STEP 2 — UPDATE SYSTEM
 # ============================================================
 print_step "Updating system packages..."
-apt update -y > /dev/null 2>&1
+apt update -y
 print_success "System updated!"
 
 # ============================================================
@@ -80,17 +79,15 @@ print_success "System updated!"
 # ============================================================
 print_step "Installing and configuring SSH..."
 
-apt install openssh-server -y > /dev/null 2>&1
+apt install openssh-server -y
 
-# Configure SSH
 sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
 sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-# Enable and start SSH
-systemctl enable ssh > /dev/null 2>&1
-systemctl restart ssh > /dev/null 2>&1
+systemctl enable ssh
+systemctl restart ssh
 
 print_success "SSH installed and configured on port 22!"
 
@@ -99,10 +96,9 @@ print_success "SSH installed and configured on port 22!"
 # ============================================================
 print_step "Installing xrdp and desktop environment..."
 
-apt install -y xfce4 xfce4-goodies xrdp dbus-x11 > /dev/null 2>&1
+apt install -y xfce4 xfce4-goodies xrdp dbus-x11
 
-# Configure xrdp
-tee /etc/xrdp/startwm.sh << 'EOF' > /dev/null
+tee /etc/xrdp/startwm.sh << 'EOF'
 #!/bin/sh
 unset DBUS_SESSION_BUS_ADDRESS
 unset XDG_RUNTIME_DIR
@@ -112,16 +108,13 @@ EOF
 chmod +x /etc/xrdp/startwm.sh
 echo "xfce4-session" > ~/.xsession
 
-# Set resolution
 sed -i 's/max_bpp=32/max_bpp=16/' /etc/xrdp/xrdp.ini
 sed -i 's/xserverbpp=24/xserverbpp=16/' /etc/xrdp/xrdp.ini
 
-# Allow port 3389
-iptables -A INPUT -p tcp --dport 3389 -j ACCEPT > /dev/null 2>&1
+iptables -A INPUT -p tcp --dport 3389 -j ACCEPT
 
-# Enable and start xrdp
-systemctl enable xrdp > /dev/null 2>&1
-systemctl restart xrdp > /dev/null 2>&1
+systemctl enable xrdp
+systemctl restart xrdp
 
 print_success "xrdp installed and configured at 1280x720!"
 
@@ -130,22 +123,19 @@ print_success "xrdp installed and configured at 1280x720!"
 # ============================================================
 print_step "Installing Firefox..."
 
-# Remove snap firefox stub
-snap remove firefox > /dev/null 2>&1
-apt remove firefox -y > /dev/null 2>&1
-apt purge firefox -y > /dev/null 2>&1
+snap remove firefox
+apt remove firefox -y
+apt purge firefox -y
 
-# Prevent snap firefox
-tee /etc/apt/preferences.d/firefox-no-snap << 'EOF' > /dev/null
+tee /etc/apt/preferences.d/firefox-no-snap << 'EOF'
 Package: firefox*
 Pin: release o=Ubuntu*
 Pin-Priority: -1
 EOF
 
-# Add Mozilla PPA and install
-add-apt-repository ppa:mozillateam/ppa -y > /dev/null 2>&1
-apt update > /dev/null 2>&1
-apt install -t 'o=LP-PPA-mozillateam' firefox -y > /dev/null 2>&1
+add-apt-repository ppa:mozillateam/ppa -y
+apt update
+apt install -t 'o=LP-PPA-mozillateam' firefox -y
 
 print_success "Firefox installed!"
 
@@ -154,15 +144,14 @@ print_success "Firefox installed!"
 # ============================================================
 print_step "Installing Tailscale..."
 
-curl -fsSL https://tailscale.com/install.sh | sh > /dev/null 2>&1
+curl -fsSL https://tailscale.com/install.sh | sh
 
-systemctl enable tailscaled > /dev/null 2>&1
-systemctl start tailscaled > /dev/null 2>&1
+systemctl enable tailscaled
+systemctl start tailscaled
 
 print_success "Tailscale installed!"
 print_warning "Run 'tailscale up' to login and get your Tailscale IP"
 
-# Start tailscale and show login link
 echo ""
 echo -e "${CYAN}Starting Tailscale — please authenticate:${NC}"
 tailscale up
@@ -176,15 +165,12 @@ fi
 # ============================================================
 print_step "Installing sshx..."
 
-# Kill any existing sshx processes
-pkill -9 sshx > /dev/null 2>&1
+pkill -9 sshx
 sleep 1
 
-# Install sshx
-curl -sSf https://sshx.io/get | sh > /dev/null 2>&1
+curl -sSf https://sshx.io/get | sh
 
-# Create sshx systemd service
-tee /etc/systemd/system/sshx.service << 'EOF' > /dev/null
+tee /etc/systemd/system/sshx.service << 'EOF'
 [Unit]
 Description=sshx terminal sharing
 After=network.target
@@ -202,9 +188,9 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload > /dev/null 2>&1
-systemctl enable sshx > /dev/null 2>&1
-systemctl start sshx > /dev/null 2>&1
+systemctl daemon-reload
+systemctl enable sshx
+systemctl start sshx
 
 print_success "sshx installed and running as a service (single instance)!"
 
@@ -213,7 +199,7 @@ print_success "sshx installed and running as a service (single instance)!"
 # ============================================================
 print_step "Setting up keepalive service..."
 
-tee /etc/systemd/system/keepalive.service << 'EOF' > /dev/null
+tee /etc/systemd/system/keepalive.service << 'EOF'
 [Unit]
 Description=Server Keepalive Service
 After=network.target
@@ -228,9 +214,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload > /dev/null 2>&1
-systemctl enable keepalive > /dev/null 2>&1
-systemctl start keepalive > /dev/null 2>&1
+systemctl daemon-reload
+systemctl enable keepalive
+systemctl start keepalive
 
 print_success "Keepalive service running (pings every 60 seconds)!"
 
@@ -239,9 +225,9 @@ print_success "Keepalive service running (pings every 60 seconds)!"
 # ============================================================
 print_step "Disabling services that can cause freezes..."
 
-systemctl disable --now unattended-upgrades > /dev/null 2>&1
-systemctl stop packagekit > /dev/null 2>&1
-systemctl disable packagekit > /dev/null 2>&1
+systemctl disable --now unattended-upgrades
+systemctl stop packagekit
+systemctl disable packagekit
 
 print_success "Freeze-causing services disabled!"
 
