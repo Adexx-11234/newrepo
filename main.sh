@@ -215,13 +215,16 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
             systemctl stop sshx > /dev/null 2>&1
+            systemctl disable sshx > /dev/null 2>&1
             systemctl daemon-reload > /dev/null 2>&1
-            systemctl enable sshx > /dev/null 2>&1
-            systemctl start sshx > /dev/null 2>&1
+            pkill -9 sshx > /dev/null 2>&1
+            sleep 1
+            setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
+            disown
             echo ""
             echo -e "${G}  ✅ sshx installed and running as service!${N}"
             sleep 4
-            SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager | grep -o 'https://sshx.io/s/[^ ]*' | head -1)
+            SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
             if [ -n "$SSHX_LINK" ]; then
                 echo -e "${G}  ➜ sshx Link: $SSHX_LINK${N}"
             else
