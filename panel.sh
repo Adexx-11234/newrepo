@@ -645,7 +645,9 @@ else
     service cron start 2>/dev/null || cron 2>/dev/null || true
 fi
 
-(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run"; echo "* * * * * /usr/bin/php8.3 /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data - 2>/dev/null || true
+EXISTING_CRON=$(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run" || true)
+NEW_CRON="${EXISTING_CRON}"$'\n'"* * * * * /usr/bin/php8.3 /var/www/pelican/artisan schedule:run >> /dev/null 2>&1"
+echo "$NEW_CRON" | crontab -u www-data - 2>/dev/null || true
 
 echo -e "${GREEN}   ✓ Cron configured${NC}"
 
