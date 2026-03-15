@@ -47,7 +47,7 @@ fi
 # BACKUP EXISTING WINGS CONFIG
 # ============================================================================
 if [ -f "/etc/pelican/config.yml" ]; then
-    BACKUP_DIR="${SCRIPT_DIR}/.backups"
+    BACKUP_DIR="/root/.backups"
     mkdir -p "$BACKUP_DIR"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     cp /etc/pelican/config.yml "${BACKUP_DIR}/wings_config_${TIMESTAMP}.backup"

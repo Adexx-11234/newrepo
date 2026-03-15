@@ -22,6 +22,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
+export HOME=/root
+export COMPOSER_HOME=/root/.composer
 hash -r 2>/dev/null || true
 
 ENV_FILE=""
@@ -321,6 +323,9 @@ echo -e "${GREEN}   ✓ Services installed${NC}"
 # INSTALL COMPOSER
 # ============================================================================
 echo -e "${CYAN}[7/20] Installing Composer...${NC}"
+export HOME=/root
+export COMPOSER_HOME=/root/.composer
+mkdir -p "$COMPOSER_HOME"
 if ! command -v composer &> /dev/null; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet 2>/dev/null
 fi
