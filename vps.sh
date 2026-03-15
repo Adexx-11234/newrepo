@@ -394,10 +394,12 @@ sleep 4
 SSHX_LINK=$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: $SSHX_LINK"
 
-# Run restart script via temp file
+# Run restart script only if Pelican is configured
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
+if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
+    curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
+fi
 REMOTE
 
     print_status "SUCCESS" "Post-boot setup done"
@@ -719,8 +721,11 @@ sleep 4
 SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: \$SSHX_LINK"
 sleep 5
+# Run restart script only if Pelican is configured
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
+if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
+    curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
+fi
 REMOTE
                     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY COMPLETE =====" >> "$wlog"
                     return 0
