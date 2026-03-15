@@ -1235,10 +1235,10 @@ export -f is_vm_running
 export -f build_qemu_cmd
 export -f freeze_recovery
 export -f post_recovery_setup
-export -f restore_snapshot
 export -f update_snapshot
 export -f ensure_snapshot
 export -f check_space
 export -f print_status
+export -f load_vm_config
 
 main_menu
