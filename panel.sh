@@ -725,9 +725,9 @@ chown -R www-data:www-data storage/app/public
 $PHP_BIN artisan storage:link 2>/dev/null || true
 
 cd storage/app/public/icons/egg
-git clone --depth 1 https://github.com/pelican-eggs/eggs.git /tmp/pelican-eggs 2>/dev/null
-find /tmp/pelican-eggs -type f \( -name "*.png" -o -name "*.svg" -o -name "*.jpg" -o -name "*.webp" \) -exec cp {} . \; 2>/dev/null
-rm -rf /tmp/pelican-eggs
+git clone --depth 1 https://github.com/pelican-eggs/eggs.git /tmp/pelican-eggs 2>/dev/null || true
+find /tmp/pelican-eggs -type f \( -name "*.png" -o -name "*.svg" -o -name "*.jpg" -o -name "*.webp" \) -exec cp {} . \; 2>/dev/null || true
+rm -rf /tmp/pelican-eggs 2>/dev/null || true
 
 chown -R www-data:www-data /var/www/pelican/storage
 chmod -R 755 /var/www/pelican/storage/app/public
@@ -742,7 +742,7 @@ cd /var/www/pelican
 # ============================================================================
 echo -e "${CYAN}[20/20] Updating egg index...${NC}"
 
-$PHP_BIN artisan p:egg:update-index 2>&1 | tail -5
+$PHP_BIN artisan p:egg:update-index 2>&1 | tail -5 || true
 
 sleep 3
 
