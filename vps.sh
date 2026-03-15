@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager v2.4
+# Enhanced Multi-VM Manager v2.5
 # Created by NexusTechPro
 # - FIXED: virtio drivers (prevents freeze)
 # - FIXED: Boot detection via TCP port check (no SSH key auth needed)
@@ -17,7 +17,8 @@ set -euo pipefail
 # - NEW:   SSH fingerprint auto-accepted (no yes/no prompt ever)
 # - NEW:   Post-boot hardening applied automatically via SSH
 # - NEW:   Menu exits cleanly after connecting to VM
-# - NEW:   Auto-backup to /tmp on freeze (SSH timeout < 60s)
+# - NEW:   Full freeze recovery: kill → backup+shrink → delete → restore → cleanup → restart
+# - NEW:   Freeze watchdog runs entire VM lifetime (not just boot)
 # =============================
 
 # --- ANSI COLORS ---
@@ -34,7 +35,7 @@ display_header() {
     clear
     echo -e "${BLUE}========================================================================"
     echo -e "  Created by NexusTechPro"
-    echo -e "  Enhanced Multi-VM Manager v2.4"
+    echo -e "  Enhanced Multi-VM Manager v2.5"
     echo -e "========================================================================${NC}"
     echo
 }
@@ -130,58 +131,67 @@ EOF
     print_status "SUCCESS" "Configuration saved to $config_file"
 }
 
-# --- BACKUP VM IMAGE TO /tmp ---
-backup_vm_to_tmp() {
+# --- FREEZE RECOVERY ---
+# Full cycle: kill → backup+shrink to /tmp → delete original → restore → delete backup → restart
+# Returns 0 if recovery succeeded and VM was restarted, 1 if failed
+freeze_recovery() {
     local vm_name=$1
     local img_file="$VM_DIR/$vm_name.img"
     local backup_file="/tmp/${vm_name}-backup.img"
+    local serial_log="$VM_DIR/$vm_name.serial.log"
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
 
-    local img_size
-    img_size=$(du -sm "$img_file" 2>/dev/null | awk '{print $1}')
-    local tmp_free
-    tmp_free=$(df -m /tmp 2>/dev/null | awk 'NR==2{print $4}')
+    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$watchdog_log"
 
-    if [[ -z "$img_size" || -z "$tmp_free" ]]; then
-        print_status "WARN" "Could not check space — skipping backup"
-        return 1
-    fi
-
-    if [[ $tmp_free -lt $img_size ]]; then
-        print_status "WARN" "Not enough space in /tmp (need ${img_size}MB, have ${tmp_free}MB)"
-        return 1
-    fi
-
-    print_status "INFO" "Backing up VM image to /tmp (${img_size}MB)..."
-    if qemu-img convert -O qcow2 -c "$img_file" "$backup_file" 2>/dev/null; then
-        print_status "SUCCESS" "Backup saved: $backup_file ($(du -sh "$backup_file" | awk '{print $1}'))"
-        return 0
-    else
-        rm -f "$backup_file" 2>/dev/null || true
-        print_status "WARN" "Backup failed"
-        return 1
-    fi
-}
-
-# --- RESTORE VM FROM /tmp BACKUP ---
-restore_vm_from_tmp() {
-    local vm_name=$1
-    local backup_file="/tmp/${vm_name}-backup.img"
-    local img_file="$VM_DIR/$vm_name.img"
-
-    if [[ ! -f "$backup_file" ]]; then
-        print_status "ERROR" "No backup found at $backup_file"
-        return 1
-    fi
-
-    print_status "INFO" "Restoring VM from backup..."
+    # Step 1 — Kill the frozen VM
+    echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
     kill_vm "$vm_name" 2>/dev/null || true
     sleep 2
 
-    if cp "$backup_file" "$img_file"; then
-        print_status "SUCCESS" "VM restored from backup"
+    # Step 2+3 — Backup to /tmp AND shrink via compression in one pass
+    echo "[$(date '+%H:%M:%S')] Step 2: Backing up and shrinking image to /tmp..." >> "$watchdog_log"
+    local orig_size
+    orig_size=$(du -sh "$img_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
+
+    if ! qemu-img convert -O qcow2 -c "$img_file" "$backup_file" >> "$watchdog_log" 2>&1; then
+        echo "[$(date '+%H:%M:%S')] ERROR: Backup failed — aborting recovery. Original image untouched." >> "$watchdog_log"
+        return 1
+    fi
+
+    local backup_size
+    backup_size=$(du -sh "$backup_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
+    echo "[$(date '+%H:%M:%S')] Backup done: $orig_size → $backup_size (compressed)" >> "$watchdog_log"
+
+    # Step 4 — Delete original image from VM_DIR
+    echo "[$(date '+%H:%M:%S')] Step 3: Deleting original image from $VM_DIR..." >> "$watchdog_log"
+    rm -f "$img_file"
+
+    # Step 5 — Restore from /tmp backup back to VM_DIR (clean uncompressed qcow2)
+    echo "[$(date '+%H:%M:%S')] Step 4: Restoring clean image from backup..." >> "$watchdog_log"
+    if ! qemu-img convert -O qcow2 "$backup_file" "$img_file" >> "$watchdog_log" 2>&1; then
+        echo "[$(date '+%H:%M:%S')] ERROR: Restore failed — backup still at $backup_file" >> "$watchdog_log"
+        return 1
+    fi
+
+    local restored_size
+    restored_size=$(du -sh "$img_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
+    echo "[$(date '+%H:%M:%S')] Restored: $restored_size" >> "$watchdog_log"
+
+    # Step 6 — Delete the /tmp backup
+    echo "[$(date '+%H:%M:%S')] Step 5: Deleting /tmp backup..." >> "$watchdog_log"
+    rm -f "$backup_file"
+
+    # Step 7 — Restart the VM
+    echo "[$(date '+%H:%M:%S')] Step 6: Restarting VM..." >> "$watchdog_log"
+    rm -f "$serial_log"
+    local qemu_cmd
+    qemu_cmd=$(build_qemu_cmd "$vm_name")
+    if eval "$qemu_cmd" >> "$watchdog_log" 2>&1; then
+        echo "[$(date '+%H:%M:%S')] VM restarted successfully" >> "$watchdog_log"
+        echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY COMPLETE =====" >> "$watchdog_log"
         return 0
     else
-        print_status "ERROR" "Restore failed"
+        echo "[$(date '+%H:%M:%S')] ERROR: Failed to restart VM" >> "$watchdog_log"
         return 1
     fi
 }
@@ -315,90 +325,6 @@ build_qemu_cmd() {
     echo "${cmd[@]}"
 }
 
-# --- CONTINUOUS FREEZE WATCHDOG ---
-# Place this after the build_qemu_cmd() function
-
-start_freeze_watchdog() {
-    local vm_name=$1
-    local serial_log="$VM_DIR/$vm_name.serial.log"
-    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
-
-    (
-        local restart_count=0
-        local max_restarts=3
-
-        # Grace period — don't monitor during initial boot
-        sleep 90
-
-        while true; do
-            sleep 30
-
-            # Stop watching if VM was intentionally killed (no pid file)
-            [[ ! -f "$VM_DIR/$vm_name.pid" ]] && exit 0
-
-            # Check if QEMU process is still alive
-            local pid
-            pid=$(cat "$VM_DIR/$vm_name.pid" 2>/dev/null) || exit 0
-            kill -0 "$pid" 2>/dev/null || {
-                echo "[$(date '+%H:%M:%S')] QEMU process died" >> "$watchdog_log"
-                exit 0
-            }
-
-            # SSH port check — this is the primary freeze indicator
-            if ! check_ssh_port_open "$SSH_PORT"; then
-
-                # Confirm with serial log staleness (avoids false positives during reboot)
-                local stale_seconds=0
-                if [[ -f "$serial_log" ]]; then
-                    local last_mod now
-                    last_mod=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
-                    now=$(date +%s)
-                    stale_seconds=$((now - last_mod))
-                fi
-
-                if [[ $stale_seconds -gt 40 ]]; then
-                    echo "[$(date '+%H:%M:%S')] FREEZE DETECTED — SSH down, serial stale ${stale_seconds}s" >> "$watchdog_log"
-                    echo "[$(date '+%H:%M:%S')] Last serial line: $(tail -1 "$serial_log" 2>/dev/null)" >> "$watchdog_log"
-
-                    [[ $restart_count -ge $max_restarts ]] && {
-                        echo "[$(date '+%H:%M:%S')] Max restarts reached. Giving up." >> "$watchdog_log"
-                        exit 1
-                    }
-
-                    # Kill frozen VM
-                    kill_vm "$vm_name" 2>/dev/null || true
-                    sleep 2
-
-                    # Backup the image to /tmp
-                    echo "[$(date '+%H:%M:%S')] Backing up image to /tmp..." >> "$watchdog_log"
-                    backup_vm_to_tmp "$vm_name" >> "$watchdog_log" 2>&1 || true
-
-                    # Restart VM
-                    rm -f "$serial_log"
-                    local qemu_cmd
-                    qemu_cmd=$(build_qemu_cmd "$vm_name")
-                    eval "$qemu_cmd" >> "$watchdog_log" 2>&1 && \
-                        echo "[$(date '+%H:%M:%S')] VM restarted (attempt $((restart_count+1))/$max_restarts)" >> "$watchdog_log" || \
-                        echo "[$(date '+%H:%M:%S')] Restart failed" >> "$watchdog_log"
-
-                    ((restart_count++))
-                    sleep 90  # wait for next boot before checking again
-
-                else
-                    echo "[$(date '+%H:%M:%S')] SSH down but serial active (${stale_seconds}s) — likely rebooting" >> "$watchdog_log"
-                fi
-
-            else
-                # SSH responsive — VM is healthy, reset counter
-                restart_count=0
-            fi
-        done
-    ) >> "$watchdog_log" 2>&1 &
-
-    disown
-    print_status "SUCCESS" "Freeze watchdog active (log: $VM_DIR/$vm_name.watchdog.log)"
-}
-
 # --- CHECK SSH PORT OPEN ---
 check_ssh_port_open() {
     local port=$1
@@ -454,89 +380,6 @@ REMOTE
     print_status "SUCCESS" "Post-boot hardening applied"
 }
 
-# --- WAIT FOR SSH WITH FREEZE DETECTION + AUTO BACKUP ---
-wait_for_ssh() {
-    local vm_name=$1
-    local max_wait=60
-    local elapsed=0
-    local freeze_recovery=0
-
-    print_status "INFO" "Waiting for VM to boot (max ${max_wait}s)..."
-    echo -n "   "
-
-    while [[ $elapsed -lt $max_wait ]]; do
-        if check_ssh_port_open "$SSH_PORT"; then
-            echo ""
-            print_status "SUCCESS" "SSH port open after ${elapsed}s"
-            return 0
-        fi
-
-        # Freeze detection via serial log staleness
-        local serial_log="$VM_DIR/$vm_name.serial.log"
-        if [[ -f "$serial_log" ]]; then
-            local last_modified now age
-            last_modified=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
-            now=$(date +%s)
-            age=$((now - last_modified))
-
-            if [[ $age -gt 30 ]]; then
-                local last_line
-                last_line=$(tail -1 "$serial_log" 2>/dev/null || echo "")
-                if echo "$last_line" | grep -q "journal\|bridge\|udevd\|Starting systemd"; then
-                    echo ""
-                    print_status "WARN" "Freeze detected at: $last_line"
-
-                    if [[ $freeze_recovery -ge 2 ]]; then
-                        print_status "ERROR" "VM frozen 3 times — giving up"
-                        return 1
-                    fi
-
-                    # Auto-backup to /tmp before recovery attempt
-                    print_status "INFO" "Auto-backing up VM image to /tmp before recovery..."
-                    kill_vm "$vm_name" 2>/dev/null || true
-                    sleep 2
-                    backup_vm_to_tmp "$vm_name" || true
-
-                    # Restart VM
-                    rm -f "$serial_log"
-                    local qemu_cmd
-                    qemu_cmd=$(build_qemu_cmd "$vm_name")
-                    eval "$qemu_cmd" || true
-                    ((freeze_recovery++))
-                    elapsed=0
-                    print_status "INFO" "VM restarted (attempt $freeze_recovery), waiting again..."
-                    echo -n "   "
-                fi
-            fi
-        fi
-
-        sleep 2
-        elapsed=$((elapsed + 2))
-        echo -n "."
-    done
-
-    echo ""
-
-    # SSH timeout after 60s = freeze likely — backup now
-    if ! check_ssh_port_open "$SSH_PORT"; then
-        print_status "WARN" "SSH did not respond within ${max_wait}s — possible freeze"
-        print_status "INFO" "Auto-backing up VM image to /tmp..."
-        kill_vm "$vm_name" 2>/dev/null || true
-        sleep 2
-        backup_vm_to_tmp "$vm_name" || true
-        print_status "INFO" "Backup done. Restart the VM to try again."
-        return 1
-    fi
-
-    if is_vm_running "$vm_name"; then
-        print_status "SUCCESS" "VM is running (boot took >${max_wait}s)"
-        return 0
-    fi
-
-    print_status "ERROR" "VM process died before boot completed"
-    return 1
-}
-
 # --- KILL VM ---
 kill_vm() {
     local vm_name=$1
@@ -564,6 +407,180 @@ is_vm_running() {
         kill -0 "$pid" 2>/dev/null && return 0
     fi
     return 1
+}
+
+# --- WAIT FOR SSH WITH FREEZE DETECTION ---
+# Monitors during boot. On freeze: runs full recovery cycle then waits again.
+wait_for_ssh() {
+    local vm_name=$1
+    local max_wait=120
+    local elapsed=0
+    local recovery_count=0
+    local max_recoveries=3
+    local serial_log="$VM_DIR/$vm_name.serial.log"
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
+
+    print_status "INFO" "Waiting for VM to boot (max ${max_wait}s)..."
+    echo -n "   "
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        if check_ssh_port_open "$SSH_PORT"; then
+            echo ""
+            print_status "SUCCESS" "SSH port open after ${elapsed}s"
+            return 0
+        fi
+
+        # Serial log staleness check — frozen kernel stops writing to serial
+        if [[ -f "$serial_log" ]]; then
+            local last_modified now age
+            last_modified=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
+            now=$(date +%s)
+            age=$((now - last_modified))
+
+            if [[ $age -gt 30 ]]; then
+                local last_line
+                last_line=$(tail -1 "$serial_log" 2>/dev/null || echo "")
+
+                echo ""
+                print_status "WARN" "Serial log stale for ${age}s — freeze detected"
+                print_status "WARN" "Froze at: $last_line"
+                echo "[$(date '+%H:%M:%S')] Boot-time freeze at: $last_line (serial stale ${age}s)" >> "$watchdog_log"
+
+                if [[ $recovery_count -ge $max_recoveries ]]; then
+                    print_status "ERROR" "Freeze recovery attempted $max_recoveries times — giving up"
+                    echo "[$(date '+%H:%M:%S')] Max recoveries reached during boot. Giving up." >> "$watchdog_log"
+                    return 1
+                fi
+
+                ((recovery_count++))
+                print_status "INFO" "Starting freeze recovery (attempt $recovery_count/$max_recoveries)..."
+                echo "[$(date '+%H:%M:%S')] Boot-time freeze recovery attempt $recovery_count/$max_recoveries" >> "$watchdog_log"
+
+                if freeze_recovery "$vm_name"; then
+                    print_status "SUCCESS" "Recovery complete — waiting for VM to boot again..."
+                    elapsed=0
+                    echo -n "   "
+                else
+                    print_status "ERROR" "Recovery failed"
+                    return 1
+                fi
+            fi
+        fi
+
+        # SSH timeout — treat as freeze if serial also stale
+        if [[ $elapsed -ge $max_wait ]]; then
+            echo ""
+            print_status "WARN" "SSH did not respond within ${max_wait}s"
+
+            local age=999
+            if [[ -f "$serial_log" ]]; then
+                local last_modified now
+                last_modified=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
+                now=$(date +%s)
+                age=$((now - last_modified))
+            fi
+
+            if [[ $age -gt 30 ]] && [[ $recovery_count -lt $max_recoveries ]]; then
+                ((recovery_count++))
+                print_status "INFO" "SSH timeout + stale serial — treating as freeze. Recovery attempt $recovery_count/$max_recoveries..."
+                echo "[$(date '+%H:%M:%S')] SSH timeout freeze recovery attempt $recovery_count/$max_recoveries" >> "$watchdog_log"
+                if freeze_recovery "$vm_name"; then
+                    print_status "SUCCESS" "Recovery complete — waiting for VM to boot again..."
+                    elapsed=0
+                    echo -n "   "
+                    continue
+                fi
+            fi
+
+            print_status "ERROR" "VM failed to boot"
+            return 1
+        fi
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+        echo -n "."
+    done
+
+    echo ""
+    return 1
+}
+
+# --- BACKGROUND WATCHDOG ---
+# Runs for the entire lifetime of the VM after boot.
+# On freeze: runs the same full recovery cycle as wait_for_ssh.
+start_freeze_watchdog() {
+    local vm_name=$1
+    local serial_log="$VM_DIR/$vm_name.serial.log"
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
+
+    (
+        local recovery_count=0
+        local max_recoveries=3
+
+        # Grace period — don't monitor during initial boot phase
+        sleep 120
+
+        while true; do
+            sleep 30
+
+            # Stop if VM was intentionally stopped (pid file removed by kill_vm)
+            [[ ! -f "$VM_DIR/$vm_name.pid" ]] && exit 0
+
+            # Stop if QEMU process died on its own
+            local pid
+            pid=$(cat "$VM_DIR/$vm_name.pid" 2>/dev/null) || exit 0
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "[$(date '+%H:%M:%S')] QEMU process died unexpectedly" >> "$watchdog_log"
+                exit 0
+            fi
+
+            # Primary check: is SSH responding?
+            if ! check_ssh_port_open "$SSH_PORT"; then
+
+                # Confirm freeze via serial log staleness
+                local stale_seconds=0
+                if [[ -f "$serial_log" ]]; then
+                    local last_modified now
+                    last_modified=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
+                    now=$(date +%s)
+                    stale_seconds=$((now - last_modified))
+                fi
+
+                if [[ $stale_seconds -gt 40 ]]; then
+                    echo "[$(date '+%H:%M:%S')] FREEZE DETECTED — SSH down, serial stale ${stale_seconds}s" >> "$watchdog_log"
+                    echo "[$(date '+%H:%M:%S')] Froze at: $(tail -1 "$serial_log" 2>/dev/null)" >> "$watchdog_log"
+
+                    if [[ $recovery_count -ge $max_recoveries ]]; then
+                        echo "[$(date '+%H:%M:%S')] Max recoveries ($max_recoveries) reached. Watchdog stopping." >> "$watchdog_log"
+                        exit 1
+                    fi
+
+                    ((recovery_count++))
+                    echo "[$(date '+%H:%M:%S')] Starting freeze recovery attempt $recovery_count/$max_recoveries" >> "$watchdog_log"
+
+                    if freeze_recovery "$vm_name"; then
+                        echo "[$(date '+%H:%M:%S')] Recovery complete — resuming monitoring after 120s grace period" >> "$watchdog_log"
+                        sleep 120  # grace period for new boot
+                    else
+                        echo "[$(date '+%H:%M:%S')] Recovery failed — watchdog stopping" >> "$watchdog_log"
+                        exit 1
+                    fi
+
+                else
+                    # SSH down but serial still active — probably just rebooting
+                    echo "[$(date '+%H:%M:%S')] SSH down but serial active (${stale_seconds}s) — likely rebooting, not frozen" >> "$watchdog_log"
+                fi
+
+            else
+                # VM is healthy — reset recovery counter
+                recovery_count=0
+            fi
+        done
+    ) >> "$watchdog_log" 2>&1 &
+
+    disown
+    print_status "SUCCESS" "Freeze watchdog running in background"
+    print_status "INFO"    "Watchdog log: $VM_DIR/$vm_name.watchdog.log"
 }
 
 # --- SSH INTO VM ---
@@ -701,21 +718,8 @@ start_vm() {
     fi
 
     if [[ ! -f "$IMG_FILE" ]]; then
-        local backup_file="/tmp/${vm_name}-backup.img"
-        if [[ -f "$backup_file" ]]; then
-            print_status "WARN" "VM image missing but backup found in /tmp"
-            read -p "$(print_status "INPUT" "Restore from /tmp backup? (Y/n): ")" restore_choice
-            restore_choice="${restore_choice:-Y}"
-            if [[ "$restore_choice" =~ ^[Yy]$ ]]; then
-                restore_vm_from_tmp "$vm_name" || { print_status "ERROR" "Restore failed"; return 1; }
-            else
-                print_status "ERROR" "VM image not found: $IMG_FILE"
-                return 1
-            fi
-        else
-            print_status "ERROR" "VM image not found: $IMG_FILE"
-            return 1
-        fi
+        print_status "ERROR" "VM image not found: $IMG_FILE"
+        return 1
     fi
 
     if [[ ! -f "$SEED_FILE" ]]; then
@@ -727,6 +731,9 @@ start_vm() {
     ssh-keygen -R "[localhost]:$SSH_PORT" 2>/dev/null || true
     ssh-keygen -R "localhost" 2>/dev/null || true
 
+    # Clear watchdog log for fresh start
+    > "$VM_DIR/$vm_name.watchdog.log"
+
     print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH port: $SSH_PORT | User: ${USERNAME} | Password: ${PASSWORD}"
 
@@ -737,16 +744,19 @@ start_vm() {
         return 1
     }
 
-    start_freeze_watchdog "$vm_name"   # <-- ADD THIS LINE HERE
+    # Start background watchdog immediately — covers full VM lifetime
+    start_freeze_watchdog "$vm_name"
 
+    # Wait for boot with boot-time freeze detection
     if wait_for_ssh "$vm_name"; then
         apply_post_boot_fixes "$SSH_PORT" "$USERNAME" "$PASSWORD"
         ssh_into_vm "$vm_name"
         print_status "INFO" "SSH session ended. Goodbye!"
         exit 0
     else
-        print_status "ERROR" "VM failed to boot. Check serial log:"
-        print_status "INFO" "  tail -30 $VM_DIR/$vm_name.serial.log"
+        print_status "ERROR" "VM failed to boot. Check logs:"
+        print_status "INFO"  "  Serial:   tail -30 $VM_DIR/$vm_name.serial.log"
+        print_status "INFO"  "  Watchdog: tail -30 $VM_DIR/$vm_name.watchdog.log"
     fi
 }
 
@@ -771,9 +781,6 @@ show_vm_info() {
     local status="Stopped"
     is_vm_running "$vm_name" && status="Running"
 
-    local backup_status="None"
-    [[ -f "/tmp/${vm_name}-backup.img" ]] && backup_status="Available (/tmp/${vm_name}-backup.img)"
-
     echo ""
     print_status "INFO" "VM Information: $vm_name"
     echo "=========================================="
@@ -791,7 +798,7 @@ show_vm_info() {
     echo "Image:         $IMG_FILE"
     echo "Seed:          $SEED_FILE"
     echo "Serial Log:    $VM_DIR/$vm_name.serial.log"
-    echo "Backup (/tmp): $backup_status"
+    echo "Watchdog Log:  $VM_DIR/$vm_name.watchdog.log"
     echo "=========================================="
     echo ""
 
@@ -818,8 +825,8 @@ delete_vm() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         is_vm_running "$vm_name" && kill_vm "$vm_name"
-        rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.serial.log"
-        rm -f "/tmp/${vm_name}-backup.img" 2>/dev/null || true
+        rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid"
+        rm -f "$VM_DIR/$vm_name.serial.log" "$VM_DIR/$vm_name.watchdog.log"
         print_status "SUCCESS" "VM '$vm_name' deleted"
     else
         print_status "INFO" "Deletion cancelled"
@@ -852,7 +859,6 @@ edit_vm_config() {
             *) print_status "ERROR" "Invalid selection"; continue ;;
         esac
 
-        [[ "$edit_choice" =~ ^[123]$ ]] && setup_vm_image
         save_vm_config
         read -p "$(print_status "INPUT" "Continue editing? (y/N): ")" cont
         [[ "$cont" =~ ^[Yy]$ ]] || break
@@ -925,6 +931,23 @@ view_serial_log() {
     read -p "$(print_status "INPUT" "Press Enter to continue...")"
 }
 
+# --- VIEW WATCHDOG LOG ---
+view_watchdog_log() {
+    local vm_name=$1
+    if ! load_vm_config "$vm_name"; then return 1; fi
+
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
+    if [[ -f "$watchdog_log" ]] && [[ -s "$watchdog_log" ]]; then
+        print_status "INFO" "Watchdog log for $vm_name (last 40 lines):"
+        echo "=========================================="
+        tail -40 "$watchdog_log"
+        echo "=========================================="
+    else
+        print_status "INFO" "No watchdog activity logged yet for $vm_name"
+    fi
+    read -p "$(print_status "INPUT" "Press Enter to continue...")"
+}
+
 # --- MAIN MENU ---
 main_menu() {
     while true; do
@@ -943,10 +966,8 @@ main_menu() {
                 else
                     status_color="${RED}Stopped${NC}"
                 fi
-                local backup_indicator=""
-                [[ -f "/tmp/${vms[$i]}-backup.img" ]] && backup_indicator=" ${YELLOW}[backup in /tmp]${NC}"
                 printf "  %2d) %s (" $((i+1)) "${vms[$i]}"
-                echo -e "$status_color)$backup_indicator"
+                echo -e "$status_color)"
             done
             echo
         fi
@@ -962,6 +983,7 @@ main_menu() {
             echo "  7) Resize VM disk"
             echo "  8) Show VM performance"
             echo "  9) View serial log (freeze diagnosis)"
+            echo " 10) View watchdog log (freeze recovery history)"
         fi
         echo "  0) Exit"
         echo
@@ -1009,6 +1031,11 @@ main_menu() {
                 [ $vm_count -eq 0 ] && continue
                 read -p "$(print_status "INPUT" "VM number for serial log: ")" n
                 [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $vm_count ] && view_serial_log "${vms[$((n-1))]}" || print_status "ERROR" "Invalid selection"
+                ;;
+            10)
+                [ $vm_count -eq 0 ] && continue
+                read -p "$(print_status "INPUT" "VM number for watchdog log: ")" n
+                [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $vm_count ] && view_watchdog_log "${vms[$((n-1))]}" || print_status "ERROR" "Invalid selection"
                 ;;
             0) print_status "INFO" "Goodbye!"; exit 0 ;;
             *) print_status "ERROR" "Invalid option" ;;
