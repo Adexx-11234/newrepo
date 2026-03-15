@@ -69,7 +69,7 @@ case "$DB_CONNECTION" in
         DB_PORT=${DB_PORT:-3306}
         DB_DATABASE=$(grep "^DB_DATABASE=" .env | cut -d'=' -f2)
         DB_USERNAME=$(grep "^DB_USERNAME=" .env | cut -d'=' -f2)
-        DB_PASSWORD=$(grep "^DB_PASSWORD=" .env | cut -d'=' -f2)
+        DB_PASSWORD=$(grep "^DB_PASSWORD=" .env | cut -d'=' -f2-)
         ;;
     pgsql)
         DB_TYPE="PostgreSQL"
@@ -78,7 +78,7 @@ case "$DB_CONNECTION" in
         DB_PORT=${DB_PORT:-5432}
         DB_DATABASE=$(grep "^DB_DATABASE=" .env | cut -d'=' -f2)
         DB_USERNAME=$(grep "^DB_USERNAME=" .env | cut -d'=' -f2)
-        DB_PASSWORD=$(grep "^DB_PASSWORD=" .env | cut -d'=' -f2)
+        DB_PASSWORD=$(grep "^DB_PASSWORD=" .env | cut -d'=' -f2-)
         ;;
     *)
         echo -e "${RED}❌ Unsupported database type: ${DB_CONNECTION}${NC}"; exit 1 ;;
@@ -353,7 +353,7 @@ SQL
         DB_PORT=${DB_PORT:-3306}
         DB_DATABASE=$(grep "^DB_DATABASE=" /var/www/pelican/.env | cut -d'=' -f2)
         DB_USERNAME=$(grep "^DB_USERNAME=" /var/www/pelican/.env | cut -d'=' -f2)
-        DB_PASSWORD=$(grep "^DB_PASSWORD=" /var/www/pelican/.env | cut -d'=' -f2)
+        DB_PASSWORD=$(grep "^DB_PASSWORD=" /var/www/pelican/.env | cut -d'=' -f2-)
         TABLE_EXISTS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" -sN -e "SHOW TABLES LIKE 'user_resource_limits';" 2>/dev/null)
         [ -z "$TABLE_EXISTS" ] && exit 0
         mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" <<SQL 2>/dev/null || exit 0
@@ -368,7 +368,7 @@ SQL
         DB_PORT=${DB_PORT:-5432}
         DB_DATABASE=$(grep "^DB_DATABASE=" /var/www/pelican/.env | cut -d'=' -f2)
         DB_USERNAME=$(grep "^DB_USERNAME=" /var/www/pelican/.env | cut -d'=' -f2)
-        DB_PASSWORD=$(grep "^DB_PASSWORD=" /var/www/pelican/.env | cut -d'=' -f2)
+        DB_PASSWORD=$(grep "^DB_PASSWORD=" /var/www/pelican/.env | cut -d'=' -f2-)
         TABLE_EXISTS=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_DATABASE" -tAc "SELECT tablename FROM pg_tables WHERE tablename='user_resource_limits';" 2>/dev/null)
         [ -z "$TABLE_EXISTS" ] && exit 0
         PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_DATABASE" <<SQL 2>/dev/null || exit 0

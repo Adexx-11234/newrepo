@@ -400,18 +400,27 @@ else
     $PHP_BIN artisan key:generate --force --quiet
 fi
 
+DB_HOST_VAL=$(grep '^DB_HOST=' "$ENV_FILE" | cut -d'"' -f2)
+DB_PORT_VAL=$(grep '^DB_PORT=' "$ENV_FILE" | cut -d'"' -f2)
+DB_NAME_VAL=$(grep '^DB_NAME=' "$ENV_FILE" | cut -d'"' -f2)
+DB_USER_VAL=$(grep '^DB_USER=' "$ENV_FILE" | cut -d'"' -f2)
+DB_PASS_VAL=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'"' -f2)
+REDIS_HOST_VAL=$(grep '^REDIS_HOST=' "$ENV_FILE" | cut -d'"' -f2)
+REDIS_PORT_VAL=$(grep '^REDIS_PORT=' "$ENV_FILE" | cut -d'"' -f2)
+REDIS_PASS_VAL=$(grep '^REDIS_PASS=' "$ENV_FILE" | cut -d'"' -f2)
+
 cat >> .env <<ENVEOF
 # Database Configuration
 DB_CONNECTION=${DB_DRIVER}
-DB_HOST=${DB_HOST}
-DB_PORT=${DB_PORT}
-DB_DATABASE=${DB_NAME}
-DB_USERNAME=${DB_USER}
-DB_PASSWORD=${DB_PASS}
+DB_HOST=${DB_HOST_VAL}
+DB_PORT=${DB_PORT_VAL}
+DB_DATABASE=${DB_NAME_VAL}
+DB_USERNAME=${DB_USER_VAL}
+DB_PASSWORD=${DB_PASS_VAL}
 # Redis Configuration
-REDIS_HOST=${REDIS_HOST}
-REDIS_PORT=${REDIS_PORT}
-REDIS_PASSWORD=${REDIS_PASS}
+REDIS_HOST=${REDIS_HOST_VAL}
+REDIS_PORT=${REDIS_PORT_VAL}
+REDIS_PASSWORD=${REDIS_PASS_VAL}
 # Cache & Session
 CACHE_DRIVER=redis
 CACHE_STORE=redis
@@ -560,11 +569,18 @@ echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
 # ============================================================================
 echo -e "${CYAN}[14/20] Running database migrations...${NC}"
 
+# Read directly from file to avoid special character corruption
+DB_HOST_VAL=$(grep '^DB_HOST=' "$ENV_FILE" | cut -d'"' -f2)
+DB_PORT_VAL=$(grep '^DB_PORT=' "$ENV_FILE" | cut -d'"' -f2)
+DB_NAME_VAL=$(grep '^DB_NAME=' "$ENV_FILE" | cut -d'"' -f2)
+DB_USER_VAL=$(grep '^DB_USER=' "$ENV_FILE" | cut -d'"' -f2)
+DB_PASS_VAL=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'"' -f2)
+
 DB_HAS_DATA=false
 if [ "$DB_DRIVER" = "pgsql" ]; then
-    TABLE_COUNT=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" 2>/dev/null || echo "0")
+    TABLE_COUNT=$(PGPASSWORD="$DB_PASS_VAL" psql -h "$DB_HOST_VAL" -p "$DB_PORT_VAL" -U "$DB_USER_VAL" -d "$DB_NAME_VAL" -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" 2>/dev/null || echo "0")
 else
-    TABLE_COUNT=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';" 2>/dev/null || echo "0")
+    TABLE_COUNT=$(mysql -h "$DB_HOST_VAL" -P "$DB_PORT_VAL" -u "$DB_USER_VAL" -p"$DB_PASS_VAL" "$DB_NAME_VAL" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME_VAL';" 2>/dev/null || echo "0")
 fi
 
 if [ "$TABLE_COUNT" -gt 5 ]; then
@@ -578,7 +594,6 @@ else
 fi
 
 echo -e "${GREEN}   ✓ Database migrations complete${NC}"
-
 # ============================================================================
 # SETUP QUEUE WORKER (Supervisor - no systemd needed)
 # ============================================================================
