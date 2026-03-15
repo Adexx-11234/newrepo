@@ -167,13 +167,20 @@ echo -e "${RED}   ⚠️  WARNING: This will DELETE all servers, users, and sett
 read -p "Remove database data? (y/n): " REMOVE_DB
 
 if [[ "$REMOVE_DB" =~ ^[Yy] ]]; then
-    if [ -n "$DB_DRIVER" ] && [ -n "$DB_HOST" ] && [ -n "$DB_NAME" ]; then
+    if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+        DB_DRIVER_VAL=$(grep '^DB_DRIVER=' "$ENV_FILE" | cut -d'"' -f2)
+        DB_HOST_VAL=$(grep '^DB_HOST=' "$ENV_FILE" | cut -d'"' -f2)
+        DB_PORT_VAL=$(grep '^DB_PORT=' "$ENV_FILE" | cut -d'"' -f2)
+        DB_NAME_VAL=$(grep '^DB_NAME=' "$ENV_FILE" | cut -d'"' -f2)
+        DB_USER_VAL=$(grep '^DB_USER=' "$ENV_FILE" | cut -d'"' -f2)
+        DB_PASS_VAL=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'"' -f2)
+
         echo -e "${RED}   ⚠️  FINAL CONFIRMATION${NC}"
-        echo -e "   Database: ${DB_DRIVER} @ ${DB_HOST}/${DB_NAME}"
+        echo -e "   Database: ${DB_DRIVER_VAL} @ ${DB_HOST_VAL}/${DB_NAME_VAL}"
         read -p "   Type 'DELETE ALL DATA' to confirm: " DB_CONFIRM
 
         if [ "$DB_CONFIRM" = "DELETE ALL DATA" ]; then
-            if [ "$DB_DRIVER" = "pgsql" ]; then
+            if [ "$DB_DRIVER_VAL" = "pgsql" ]; then
                 # Install postgresql-client if missing
                 if ! command -v psql &>/dev/null; then
                     echo -e "${YELLOW}   psql not found — installing postgresql-client...${NC}"
@@ -183,13 +190,11 @@ if [[ "$REMOVE_DB" =~ ^[Yy] ]]; then
                 fi
 
                 echo -e "${YELLOW}   Dropping all tables...${NC}"
-                PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-                    -c "DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;" 2>/dev/null && {
+                PGPASSWORD="$DB_PASS_VAL" psql -h "$DB_HOST_VAL" -p "$DB_PORT_VAL" -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
+                    -c "DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;" && {
                     echo -e "${GREEN}   ✓ PostgreSQL tables dropped${NC}"
                 } || {
-                    echo -e "${RED}   ✗ Failed to drop tables — running verbose for details...${NC}"
-                    PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-                        -c "DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;"
+                    echo -e "${RED}   ✗ Failed to drop tables${NC}"
                 }
             else
                 # Install mysql-client if missing
@@ -200,8 +205,8 @@ if [[ "$REMOVE_DB" =~ ^[Yy] ]]; then
                         { echo -e "${RED}   ✗ Failed to install mysql-client${NC}"; exit 1; }
                 fi
 
-                mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" \
-                    -e "DROP DATABASE IF EXISTS ${DB_NAME}; CREATE DATABASE ${DB_NAME};" 2>/dev/null && {
+                mysql -h "$DB_HOST_VAL" -P "$DB_PORT_VAL" -u "$DB_USER_VAL" -p"$DB_PASS_VAL" \
+                    -e "DROP DATABASE IF EXISTS ${DB_NAME_VAL}; CREATE DATABASE ${DB_NAME_VAL};" 2>/dev/null && {
                     echo -e "${GREEN}   ✓ MySQL data removed${NC}"
                 } || {
                     echo -e "${RED}   ✗ Failed to drop database${NC}"
