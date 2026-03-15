@@ -1226,4 +1226,19 @@ declare -A OS_OPTIONS=(
     ["Rocky Linux 9"]="rockylinux|9|https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2|rocky9|rocky|rocky"
 )
 
+# --- EXPORT FUNCTIONS FOR SUBSHELLS ---
+export BACKUP_DIR
+export SNAPSHOT_DIR
+export -f check_ssh_port_open
+export -f kill_vm
+export -f is_vm_running
+export -f build_qemu_cmd
+export -f freeze_recovery
+export -f post_recovery_setup
+export -f restore_snapshot
+export -f update_snapshot
+export -f ensure_snapshot
+export -f check_space
+export -f print_status
+
 main_menu
