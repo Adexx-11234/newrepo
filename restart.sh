@@ -189,34 +189,35 @@ else
 fi
 
 # ============================================================================
-# 5. START PANEL QUEUE WORKER
+# 5. CRON, SUPERVISOR & AUTO-LIMITS
 # ============================================================================
-echo -e "${CYAN}[5/7] Starting Panel Queue Worker...${NC}"
+echo -e "${CYAN}[5/7] Starting Cron, Supervisor & Auto-Limits...${NC}"
 
-if pgrep -f "queue:work" >/dev/null; then
-    echo -e "${GREEN}   ✓ Queue worker already running${NC}"
-    ((SERVICES_STARTED++))
+# Cron
+service cron start 2>/dev/null || cron 2>/dev/null || true
+pgrep cron >/dev/null && echo -e "${GREEN}   ✓ Cron running${NC}" || echo -e "${RED}   ✗ Cron failed${NC}"
+
+# Supervisord + Queue Worker
+if ! pgrep supervisord >/dev/null; then
+    supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
+    sleep 2
+fi
+supervisorctl reread 2>/dev/null || true
+supervisorctl update 2>/dev/null || true
+supervisorctl start pelican-queue 2>/dev/null || supervisorctl restart pelican-queue 2>/dev/null || true
+pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}   ✓ Queue worker running${NC}" || echo -e "${RED}   ✗ Queue worker failed${NC}"
+
+# Auto-Limits
+if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
+    /usr/local/bin/pelican-auto-resource-limits.sh && \
+        echo -e "${GREEN}   ✓ Resource limits assigned${NC}" || \
+        echo -e "${YELLOW}   ⚠ Could not assign limits${NC}"
+    pkill -f "pelican-auto-resource-limits-fast.sh" 2>/dev/null || true
+    sleep 1
+    nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh > /var/log/pelican-auto-limits-fast.log 2>&1 &
+    echo -e "${GREEN}   ✓ Fast auto-limit service restarted${NC}"
 else
-    if [ -d "/var/www/pelican" ]; then
-        cd /var/www/pelican
-        pkill -f "queue:work" 2>/dev/null || true
-        sleep 1
-
-        PHP_BIN="/usr/bin/php${PHP_VERSION}"
-        [ ! -f "$PHP_BIN" ] && PHP_BIN="/usr/bin/php8.3"
-        [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
-
-        if command -v supervisorctl &>/dev/null; then
-            supervisorctl restart pelican-queue 2>/dev/null || \
-            nohup sudo -u www-data $PHP_BIN artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
-        else
-            nohup sudo -u www-data $PHP_BIN artisan queue:work --queue=high,standard,low --sleep=3 --tries=3 > /var/log/pelican-queue.log 2>&1 &
-        fi
-        sleep 2
-        pgrep -f "queue:work" >/dev/null && { echo -e "${GREEN}   ✓ Queue worker started${NC}"; ((SERVICES_STARTED++)); } || echo -e "${RED}   ✗ Queue worker failed${NC}"
-    else
-        echo -e "${YELLOW}   ⚠ Panel not installed${NC}"
-    fi
+    echo -e "${YELLOW}   ⚠ Resource limits script not found${NC}"
 fi
 
 # ============================================================================
@@ -298,7 +299,10 @@ docker ps >/dev/null 2>&1 && echo -e "${GREEN}✓ Docker:       Running ($(docke
 redis-cli ping >/dev/null 2>&1 && echo -e "${GREEN}✓ Redis:        Running${NC}" || echo -e "${RED}✗ Redis:        Not Running${NC}"
 netstat -tulpn 2>/dev/null | grep -q ":9000" && echo -e "${GREEN}✓ PHP-FPM:      Running (port 9000)${NC}" || echo -e "${RED}✗ PHP-FPM:      Not Running${NC}"
 pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443" && echo -e "${GREEN}✓ Nginx:        Running (port 8443)${NC}" || echo -e "${RED}✗ Nginx:        Not Running${NC}"
+pgrep cron >/dev/null && echo -e "${GREEN}✓ Cron:         Running${NC}" || echo -e "${RED}✗ Cron:         Not Running${NC}"
+pgrep supervisord >/dev/null && echo -e "${GREEN}✓ Supervisor:   Running${NC}" || echo -e "${RED}✗ Supervisor:   Not Running${NC}"
 pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}✓ Queue Worker: Running${NC}" || echo -e "${RED}✗ Queue Worker: Not Running${NC}"
+pgrep -f "auto-resource-limits-fast" >/dev/null && echo -e "${GREEN}✓ Auto-Limits:  Running${NC}" || echo -e "${RED}✗ Auto-Limits:  Not Running${NC}"
 pgrep -x wings >/dev/null && echo -e "${GREEN}✓ Wings:        Running${NC}" || echo -e "${YELLOW}⚠ Wings:        Not Running${NC}"
 CF_COUNT=$(pgrep -f cloudflared | wc -l)
 [ "$CF_COUNT" -gt 0 ] && echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} tunnel(s))${NC}" || echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
