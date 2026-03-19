@@ -178,7 +178,8 @@ build_qemu_cmd() {
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
 
     detect_acceleration
-
+    
+    # Log TCG warning to stderr so it doesn't get captured by $()
     if [[ "$ACCEL_MODE" == "tcg" ]]; then
         print_status "WARN" "KVM not available — using optimized TCG" >&2
     fi
