@@ -211,7 +211,7 @@ build_and_run_qemu() {
         -device "virtio-blk-pci,drive=hd0,iothread=io0" \
         -drive "file=$seed_file,format=raw,if=virtio,cache=writeback" \
         -boot order=c \
-        -device "virtio-net-pci,netdev=n0,rx_queue_size=1024,tx_queue_size=1024,romfile=" \
+        -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=" \
         -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.8.8${netdev_extra}" \
         -object rng-random,filename=/dev/urandom,id=rng0 \
         -device virtio-rng-pci,rng=rng0 \
