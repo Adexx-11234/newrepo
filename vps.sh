@@ -169,19 +169,21 @@ detect_acceleration() {
 }
 
 # ============================================================================
-# BUILD QEMU COMMAND (main scope — uses globals)
+# BUILD AND RUN QEMU DIRECTLY (never via $() — globals die in subshell)
 # ============================================================================
-build_qemu_cmd() {
+build_and_run_qemu() {
     local vm_name=$1
+    local extra_args="${2:-}"   # optional: pass ">> logfile 2>&1" etc
     local live_img="$BACKUP_DIR/$vm_name.img"
     local seed_file="$BACKUP_DIR/$vm_name-seed.iso"
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
 
+    # detect_acceleration sets QEMU_ACCEL_FLAGS, QEMU_CPU_FLAGS, ACCEL_MODE
+    # directly in THIS shell — globals are alive when qemu runs below
     detect_acceleration
-    
-    # Log TCG warning to stderr so it doesn't get captured by $()
+
     if [[ "$ACCEL_MODE" == "tcg" ]]; then
-        print_status "WARN" "KVM not available — using optimized TCG" >&2
+        print_status "WARN" "KVM not available — using optimized TCG"
     fi
 
     # Build port forwards
@@ -194,47 +196,32 @@ build_qemu_cmd() {
         done
     fi
 
-    local cmd=(
-        qemu-system-x86_64
-        $QEMU_ACCEL_FLAGS
-        $QEMU_CPU_FLAGS
-        -machine q35,mem-merge=off,hpet=off
-        -m "$MEMORY"
-        -smp "$CPUS"
-        # Anti-freeze: disable VM sleep/hibernate states
-        -global ICH9-LPC.disable_s3=1
-        -global ICH9-LPC.disable_s4=1
-        # Hardware watchdog — auto-resets VM if kernel hangs
-        -device i6300esb
-        -watchdog-action reset
-        # Fast disk with dedicated iothread
-        -object iothread,id=io0
-        -drive "id=hd0,file=$live_img,format=qcow2,if=none,cache=writeback,discard=unmap,aio=threads"
-        -device "virtio-blk-pci,drive=hd0,iothread=io0"
-        # Cloud-init seed
-        -drive "file=$seed_file,format=raw,if=virtio,cache=writeback"
-        -boot order=c
-        # Network — tuned queue sizes, all port forwards in one netdev
-        -device "virtio-net-pci,netdev=n0,rx_queue_size=1024,tx_queue_size=1024,romfile="
-        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.8.8${netdev_extra}"
-        # RNG — prevents boot entropy stall
-        -object rng-random,filename=/dev/urandom,id=rng0
-        -device virtio-rng-pci,rng=rng0
-        # Balloon for dynamic RAM
-        -device virtio-balloon-pci
-        # Pre-allocate all RAM upfront — prevents mid-run page faults
-        -mem-prealloc
-        # Clock and timer anti-freeze stack
-        -rtc base=utc,clock=host,driftfix=slew
-        -global kvm-pit.lost_tick_policy=delay
-        # Output
-        -serial "file:$serial_log"
-        -display none
-        -daemonize
+    qemu-system-x86_64 \
+        $QEMU_ACCEL_FLAGS \
+        $QEMU_CPU_FLAGS \
+        -machine q35,mem-merge=off,hpet=off \
+        -m "$MEMORY" \
+        -smp "$CPUS" \
+        -global ICH9-LPC.disable_s3=1 \
+        -global ICH9-LPC.disable_s4=1 \
+        -device i6300esb \
+        -watchdog-action reset \
+        -object iothread,id=io0 \
+        -drive "id=hd0,file=$live_img,format=qcow2,if=none,cache=writeback,discard=unmap,aio=threads" \
+        -device "virtio-blk-pci,drive=hd0,iothread=io0" \
+        -drive "file=$seed_file,format=raw,if=virtio,cache=writeback" \
+        -boot order=c \
+        -device "virtio-net-pci,netdev=n0,rx_queue_size=1024,tx_queue_size=1024,romfile=" \
+        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.8.8${netdev_extra}" \
+        -object rng-random,filename=/dev/urandom,id=rng0 \
+        -device virtio-rng-pci,rng=rng0 \
+        -device virtio-balloon-pci \
+        -rtc base=utc,clock=host,driftfix=slew \
+        -global kvm-pit.lost_tick_policy=delay \
+        -serial "file:$serial_log" \
+        -display none \
+        -daemonize \
         -pidfile "$BACKUP_DIR/$vm_name.pid"
-    )
-
-    echo "${cmd[@]}"
 }
 
 # ============================================================================
@@ -655,9 +642,7 @@ freeze_recovery() {
     # Step 4 — Restart VM
     echo "[$(date '+%H:%M:%S')] Step 4: Restarting VM..." >> "$watchdog_log"
     rm -f "$serial_log"
-    local qemu_cmd
-    qemu_cmd=$(build_qemu_cmd "$vm_name")
-    if ! eval "$qemu_cmd" >> "$watchdog_log" 2>&1; then
+if ! build_and_run_qemu "$vm_name" >> "$watchdog_log" 2>&1; then
         echo "[$(date '+%H:%M:%S')] ERROR: Failed to restart VM" >> "$watchdog_log"
         return 1
     fi
@@ -841,7 +826,6 @@ start_freeze_watchdog() {
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0"
             qcmd+=" -device virtio-balloon-pci"
-            qcmd+=" -mem-prealloc"
             qcmd+=" -rtc base=utc,clock=host,driftfix=slew"
             qcmd+=" -global kvm-pit.lost_tick_policy=delay"
             qcmd+=" -serial file:$serial"
@@ -1336,9 +1320,7 @@ EOF
     print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH: port $SSH_PORT | user: $USERNAME | pass: $PASSWORD"
 
-    local qemu_cmd
-    qemu_cmd=$(build_qemu_cmd "$vm_name")
-    if ! eval "$qemu_cmd"; then
+if ! build_and_run_qemu "$vm_name"; then
         print_status "ERROR" "Failed to start QEMU"
         return 1
     fi
