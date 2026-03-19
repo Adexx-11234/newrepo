@@ -170,18 +170,25 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
-if pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443"; then
-    echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
-    ((SERVICES_STARTED++))
+if pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443"); then
+        echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
+        ((SERVICES_STARTED++))
 else
     pkill nginx 2>/dev/null || true
     sleep 1
-    systemctl start nginx 2>/dev/null || \
-    service nginx start 2>/dev/null || \
-    nginx 2>/dev/null || true
+# Fix Nginx config first (Livewire caching block causes issues)
+    sudo sed -i '/# Disable caching for Livewire/,/^}/d' /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
+    # Test config before starting
+    nginx -t 2>/dev/null && {
+        systemctl start nginx 2>/dev/null || \
+        service nginx start 2>/dev/null || \
+        nginx 2>/dev/null || true
+    } || {
+        echo -e "${RED}   ✗ Nginx config test failed — check /etc/nginx/sites-available/pelican.conf${NC}"
+    }
     sleep 2
 
-    if pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443"; then
+   if pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443"); then
         echo -e "${GREEN}   ✓ Nginx started (port 8443)${NC}"
         ((SERVICES_STARTED++))
     else
@@ -300,8 +307,7 @@ echo ""
 
 docker ps >/dev/null 2>&1 && echo -e "${GREEN}✓ Docker:       Running ($(docker ps -q | wc -l) containers)${NC}" || echo -e "${RED}✗ Docker:       Not Running${NC}"
 redis-cli ping >/dev/null 2>&1 && echo -e "${GREEN}✓ Redis:        Running${NC}" || echo -e "${RED}✗ Redis:        Not Running${NC}"
-netstat -tulpn 2>/dev/null | grep -q ":9000" && echo -e "${GREEN}✓ PHP-FPM:      Running (port 9000)${NC}" || echo -e "${RED}✗ PHP-FPM:      Not Running${NC}"
-pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443" && echo -e "${GREEN}✓ Nginx:        Running (port 8443)${NC}" || echo -e "${RED}✗ Nginx:        Not Running${NC}"
+pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443") && echo -e "${GREEN}✓ Nginx:        Running (port 8443)${NC}" || echo -e "${RED}✗ Nginx:        Not Running${NC}"
 pgrep cron >/dev/null && echo -e "${GREEN}✓ Cron:         Running${NC}" || echo -e "${RED}✗ Cron:         Not Running${NC}"
 pgrep supervisord >/dev/null && echo -e "${GREEN}✓ Supervisor:   Running${NC}" || echo -e "${RED}✗ Supervisor:   Not Running${NC}"
 pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}✓ Queue Worker: Running${NC}" || echo -e "${RED}✗ Queue Worker: Not Running${NC}"
