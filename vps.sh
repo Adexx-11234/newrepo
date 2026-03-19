@@ -180,7 +180,7 @@ build_qemu_cmd() {
     detect_acceleration
 
     if [[ "$ACCEL_MODE" == "tcg" ]]; then
-        print_status "WARN" "KVM not available — using optimized TCG (thread=multi, tb-size=512, cpu=max)"
+        print_status "WARN" "KVM not available — using optimized TCG" >&2
     fi
 
     # Build port forwards
