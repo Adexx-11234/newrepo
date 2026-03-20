@@ -79,7 +79,12 @@ else
 
     # Fallback to manual dockerd
     if [ "$HAS_SYSTEMD" = false ]; then
-        nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
+        echo '{
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450
+}' > /etc/docker/daemon.json
+    nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
     fi
 
     echo -n "   Waiting for Docker"
@@ -292,7 +297,9 @@ if [ -d "/var/www/pelican" ]; then
     $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
     rm -rf storage/framework/views/* storage/framework/cache/* 2>/dev/null || true
-    redis-cli FLUSHDB >/dev/null 2>&1 || true
+    redis-cli FLUSHDB >/dev/null 2>redis-cli FLUSHDB >/dev/null 2>&1 || true1 || true
+echo "nameserver 1.1.1.1
+nameserver 8.8.8.8" > /etc/resolv.conf
     echo -e "${GREEN}   ✓ Cache cleared${NC}"
 fi
 

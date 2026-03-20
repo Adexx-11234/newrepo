@@ -481,10 +481,10 @@ if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
     sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
     sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
     # Reduce workers to save RAM
-    sed -i 's/^pm.max_children.*/pm.max_children = 5/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.start_servers.*/pm.start_servers = 2/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.min_spare_servers.*/pm.min_spare_servers = 1/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.max_spare_servers.*/pm.max_spare_servers = 3/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.max_children.*/pm.max_children = 20/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.start_servers.*/pm.start_servers = 5/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.min_spare_servers.*/pm.min_spare_servers = 3/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.max_spare_servers.*/pm.max_spare_servers = 10/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
 fi
 
 if [ "$HAS_SYSTEMD" = true ]; then
@@ -523,7 +523,16 @@ server {
     error_log  /var/log/nginx/pelican.app-error.log error;
     client_max_body_size 100m;
     client_body_timeout 120s;
-    sendfile off;
+    sendfile on;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript;
+    gzip_min_length 1000;
+
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
     add_header X-Robots-Tag none;
@@ -718,6 +727,30 @@ fi
 
 sleep 2
 echo -e "${GREEN}   ✓ All caches cleared${NC}"
+
+# Fix DNS
+echo "nameserver 1.1.1.1
+nameserver 8.8.8.8" > /etc/resolv.conf
+
+# Enable OPcache
+echo "zend_extension=opcache.so
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=10000
+opcache.revalidate_freq=0
+opcache.fast_shutdown=1
+opcache.validate_timestamps=0" > /etc/php/${PHP_VERSION}/mods-available/opcache.ini
+phpenmod -v ${PHP_VERSION} opcache
+systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || true
+
+# Cloudflare auto-restart
+mkdir -p /etc/systemd/system/cloudflared.service.d
+echo "[Service]
+Restart=always
+RestartSec=5" > /etc/systemd/system/cloudflared.service.d/restart.conf
+systemctl daemon-reload
 
 # ============================================================================
 # INSTALL EGG ICONS
