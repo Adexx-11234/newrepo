@@ -15,8 +15,7 @@ set -euo pipefail
 #
 # Architecture:
 #   - /home/vms/name.img              = live running image (QEMU reads natively)
-#   - /nexusvms/name.img              = uncompressed working copy (temporary)
-#   - /nexusvms/name.img.compressed   = compressed snapshot (for freeze recovery)
+#   - /nexusvms/name.img.compressed   = compressed snapshot (created only on freeze, cleared after restore)
 # =============================
 
 # --- ANSI COLORS (global scope) ---
@@ -113,7 +112,6 @@ load_vm_config() {
         unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS CREATED
         source "$config_file"
         LIVE_IMG="$BACKUP_DIR/$vm_name.img"
-        SNAPSHOT_IMG="$SNAPSHOT_DIR/$vm_name.img"
         SNAPSHOT_COMPRESSED="$SNAPSHOT_DIR/$vm_name.img.compressed"
         SEED_FILE="$BACKUP_DIR/$vm_name-seed.iso"
         return 0
@@ -224,74 +222,6 @@ build_and_run_qemu() {
         -pidfile "$BACKUP_DIR/$vm_name.pid"
 }
 
-# ============================================================================
-# SNAPSHOT MANAGEMENT
-# ============================================================================
-
-ensure_snapshot() {
-    local vm_name=$1
-    local live_img="$BACKUP_DIR/$vm_name.img"
-    local snapshot_img="$SNAPSHOT_DIR/$vm_name.img"
-    local snapshot_compressed="$SNAPSHOT_DIR/$vm_name.img.compressed"
-    local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
-
-    mkdir -p "$SNAPSHOT_DIR"
-
-    if [[ -f "$snapshot_compressed" ]] && [[ ! -f "${snapshot_compressed}.compressing" ]]; then
-        print_status "INFO" "Compressed snapshot ready ($(du -sh "$snapshot_compressed" | awk '{print $1}'))"
-        return 0
-    fi
-
-    if [[ -f "$snapshot_img" ]] || [[ -f "${snapshot_compressed}.compressing" ]]; then
-        print_status "INFO" "Snapshot compression already in progress"
-        return 0
-    fi
-
-    check_space "/" 8 || return 1
-
-    print_status "INFO" "Copying live image to tmpfs for snapshot..."
-    echo "[$(date '+%H:%M:%S')] Creating initial snapshot copy" >> "$watchdog_log"
-
-    if cp "$live_img" "$snapshot_img"; then
-        print_status "SUCCESS" "Snapshot copy done ($(du -sh "$snapshot_img" | awk '{print $1}'))"
-        echo "[$(date '+%H:%M:%S')] Copy done — starting background compression" >> "$watchdog_log"
-        start_background_compression "$vm_name"
-        return 0
-    else
-        print_status "ERROR" "Failed to create snapshot copy"
-        rm -f "$snapshot_img"
-        return 1
-    fi
-}
-
-start_background_compression() {
-    local vm_name=$1
-    local snapshot_img="$SNAPSHOT_DIR/$vm_name.img"
-    local snapshot_compressed="$SNAPSHOT_DIR/$vm_name.img.compressed"
-    local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
-
-    (
-        local wlog="$watchdog_log"
-        local src="$snapshot_img"
-        local dst="$snapshot_compressed"
-        local dst_tmp="${dst}.compressing"
-
-        echo "[$(date '+%H:%M:%S')] Background compression started..." >> "$wlog"
-
-        if qemu-img convert -O qcow2 -c "$src" "$dst_tmp" >> "$wlog" 2>&1; then
-            mv "$dst_tmp" "$dst"
-            rm -f "$src"
-            local sz
-            sz=$(du -sh "$dst" 2>/dev/null | awk '{print $1}')
-            echo "[$(date '+%H:%M:%S')] Compression complete: $sz" >> "$wlog"
-        else
-            rm -f "$dst_tmp"
-            echo "[$(date '+%H:%M:%S')] Compression failed — uncompressed copy remains" >> "$wlog"
-        fi
-    ) &
-    disown
-    print_status "INFO" "Background compression started (10-20 mins)"
-}
 
 # ============================================================================
 # SSH CHECK — banner check, not just TCP (frozen VMs accept TCP but no banner)
@@ -583,73 +513,85 @@ wait_for_ssh() {
 freeze_recovery() {
     local vm_name=$1
     local live_img="$BACKUP_DIR/$vm_name.img"
-    local snapshot_img="$SNAPSHOT_DIR/$vm_name.img"
-    local snapshot_compressed="$SNAPSHOT_DIR/$vm_name.img.compressed"
+    local snap_compressed="$SNAPSHOT_DIR/$vm_name.img.compressed"
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
 
     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$watchdog_log"
 
-    # Step 1 — Wait for compressed snapshot (up to 20 mins)
-    echo "[$(date '+%H:%M:%S')] Step 1: Waiting for compressed snapshot..." >> "$watchdog_log"
-    local wait_elapsed=0
-    local use_snapshot=""
-
-    while true; do
-        if [[ -f "$snapshot_compressed" ]] && [[ ! -f "${snapshot_compressed}.compressing" ]]; then
-            use_snapshot="$snapshot_compressed"
-            echo "[$(date '+%H:%M:%S')] Compressed snapshot ready" >> "$watchdog_log"
-            break
-        fi
-        if [[ $wait_elapsed -ge 1200 ]]; then
-            if [[ -f "$snapshot_img" ]]; then
-                use_snapshot="$snapshot_img"
-                echo "[$(date '+%H:%M:%S')] Compression timeout — using uncompressed snapshot" >> "$watchdog_log"
-                break
-            else
-                echo "[$(date '+%H:%M:%S')] ERROR: No snapshot available for recovery" >> "$watchdog_log"
-                return 1
-            fi
-        fi
-        echo "[$(date '+%H:%M:%S')] Waiting for compression... (${wait_elapsed}s elapsed)" >> "$watchdog_log"
-        sleep 30
-        wait_elapsed=$((wait_elapsed + 30))
-    done
-
-    # Step 2 — Kill frozen VM
-    echo "[$(date '+%H:%M:%S')] Step 2: Killing frozen VM..." >> "$watchdog_log"
+    # Step 1 — Kill frozen VM
+    echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
     kill_vm "$vm_name"
     sleep 2
 
-    # Step 3 — Restore to /home (atomic swap)
-    echo "[$(date '+%H:%M:%S')] Step 3: Restoring snapshot to /home..." >> "$watchdog_log"
-    local tmp_live="${live_img}.restoring"
+    # Step 2 — Compress live image to tmpfs
+    echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$watchdog_log"
+    local tmp_c="${snap_compressed}.compressing"
+    rm -f "$tmp_c" "$snap_compressed"
 
-    if cp "$use_snapshot" "$tmp_live"; then
-        if qemu-img check "$tmp_live" >> "$watchdog_log" 2>&1; then
-            mv "$tmp_live" "$live_img"
-            echo "[$(date '+%H:%M:%S')] Restore verified OK" >> "$watchdog_log"
-        else
-            rm -f "$tmp_live"
-            echo "[$(date '+%H:%M:%S')] ERROR: Verification failed — keeping old image" >> "$watchdog_log"
-            return 1
-        fi
-    else
-        echo "[$(date '+%H:%M:%S')] ERROR: Copy failed" >> "$watchdog_log"
+    if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
+        echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
+        rm -f "$tmp_c"
         return 1
     fi
+    mv "$tmp_c" "$snap_compressed"
+    echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$watchdog_log"
 
-    # Step 4 — Restart VM
-    echo "[$(date '+%H:%M:%S')] Step 4: Restarting VM..." >> "$watchdog_log"
+    # Step 3 — Compress back to /home with 5 min timeout
+    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (5 min timeout)..." >> "$watchdog_log"
+    local restore_tmp="${live_img}.restoring"
+    rm -f "$live_img" "$restore_tmp"
+
+    qemu-img convert -O qcow2 -c "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
+    local compress_pid=$!
+    local elapsed=0
+    local success=false
+
+    while [[ $elapsed -lt 300 ]]; do
+        if ! kill -0 "$compress_pid" 2>/dev/null; then
+            if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
+                success=true
+            fi
+            break
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+
+    if [[ "$success" == false ]]; then
+        kill "$compress_pid" 2>/dev/null || true
+        wait "$compress_pid" 2>/dev/null || true
+        rm -f "$restore_tmp"
+        echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$watchdog_log"
+        if ! cp "$snap_compressed" "$restore_tmp"; then
+            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$watchdog_log"
+            return 1
+        fi
+        if ! qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
+            rm -f "$restore_tmp"
+            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$watchdog_log"
+            return 1
+        fi
+    fi
+
+    mv "$restore_tmp" "$live_img"
+    echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
+
+    # Step 4 — Clear tmpfs
+    echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$watchdog_log"
+    rm -f "$snap_compressed"
+
+    # Step 5 — Restart VM
+    echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$watchdog_log"
     rm -f "$serial_log"
-if ! build_and_run_qemu "$vm_name" >> "$watchdog_log" 2>&1; then
+    if ! build_and_run_qemu "$vm_name"; then
         echo "[$(date '+%H:%M:%S')] ERROR: Failed to restart VM" >> "$watchdog_log"
         return 1
     fi
 
-    # Step 5 — Wait for SSH
-    local elapsed=0
-    while [[ $elapsed -lt 120 ]]; do
+    # Step 6 — Wait for SSH
+    local el=0
+    while [[ $el -lt 120 ]]; do
         if check_ssh_port_open "$SSH_PORT"; then
             echo "[$(date '+%H:%M:%S')] SSH ready — post-recovery setup..." >> "$watchdog_log"
             sleep 10
@@ -658,7 +600,7 @@ if ! build_and_run_qemu "$vm_name" >> "$watchdog_log" 2>&1; then
             return 0
         fi
         sleep 5
-        elapsed=$((elapsed + 5))
+        el=$((el + 5))
     done
 
     echo "[$(date '+%H:%M:%S')] WARNING: SSH did not respond after recovery" >> "$watchdog_log"
@@ -728,65 +670,83 @@ start_freeze_watchdog() {
         }
 
         # ---- Full recovery inline ----
-        recover_local() {
+            recover_local() {
             local vm=$1
             local live_img="$_BACKUP_DIR/$vm.img"
             local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
-            local snap_img="$_SNAPSHOT_DIR/$vm.img"
             local serial="$_BACKUP_DIR/$vm.serial.log"
             local wlog="$_BACKUP_DIR/$vm.watchdog.log"
 
             echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
 
-            # Wait for compressed snapshot
-            echo "[$(date '+%H:%M:%S')] Step 1: Waiting for compressed snapshot..." >> "$wlog"
-            local waited=0
-            local use_snap=""
-            while true; do
-                if [[ -f "$snap_compressed" ]] && [[ ! -f "${snap_compressed}.compressing" ]]; then
-                    use_snap="$snap_compressed"
-                    echo "[$(date '+%H:%M:%S')] Compressed snapshot ready" >> "$wlog"
-                    break
-                fi
-                if [[ $waited -ge 1200 ]]; then
-                    if [[ -f "$snap_img" ]]; then
-                        use_snap="$snap_img"
-                        echo "[$(date '+%H:%M:%S')] Timeout — using uncompressed" >> "$wlog"
-                        break
-                    else
-                        echo "[$(date '+%H:%M:%S')] ERROR: No snapshot available" >> "$wlog"
-                        return 1
-                    fi
-                fi
-                echo "[$(date '+%H:%M:%S')] Waiting for compression... (${waited}s)" >> "$wlog"
-                sleep 30
-                waited=$((waited + 30))
-            done
-
-            # Kill VM
-            echo "[$(date '+%H:%M:%S')] Step 2: Killing frozen VM..." >> "$wlog"
+            # Step 1 — Kill the frozen VM first
+            echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
             kill_vm_local "$vm"
             sleep 2
 
-            # Restore
-            echo "[$(date '+%H:%M:%S')] Step 3: Restoring to /home..." >> "$wlog"
-            local tmp="${live_img}.restoring"
-            if cp "$use_snap" "$tmp"; then
-                if qemu-img check "$tmp" >> "$wlog" 2>&1; then
-                    mv "$tmp" "$live_img"
-                    echo "[$(date '+%H:%M:%S')] Restore verified OK" >> "$wlog"
-                else
-                    rm -f "$tmp"
-                    echo "[$(date '+%H:%M:%S')] ERROR: Verification failed" >> "$wlog"
-                    return 1
-                fi
-            else
-                echo "[$(date '+%H:%M:%S')] ERROR: Copy failed" >> "$wlog"
+            # Step 2 — Compress live image directly to tmpfs
+            echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
+            local tmp_c="${snap_compressed}.compressing"
+            rm -f "$tmp_c" "$snap_compressed"
+
+            if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+                echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
+                rm -f "$tmp_c"
                 return 1
             fi
+            mv "$tmp_c" "$snap_compressed"
+            echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
 
-            # Restart VM — detect acceleration inline
-            echo "[$(date '+%H:%M:%S')] Step 4: Restarting VM..." >> "$wlog"
+            # Step 3 — Compress back from tmpfs to /home with 5 min timeout
+            # If it takes longer than 5 mins, kill it and just copy directly
+            echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (5 min timeout)..." >> "$wlog"
+            local restore_tmp="${live_img}.restoring"
+            rm -f "$live_img" "$restore_tmp"
+
+            # Run compress-back in background, watch it with a timeout
+            qemu-img convert -O qcow2 -c "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
+            local compress_pid=$!
+            local elapsed=0
+            local success=false
+
+            while [[ $elapsed -lt 300 ]]; do
+                if ! kill -0 "$compress_pid" 2>/dev/null; then
+                    # Process finished — check if output exists and is valid
+                    if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                        success=true
+                    fi
+                    break
+                fi
+                sleep 5
+                elapsed=$((elapsed + 5))
+            done
+
+            if [[ "$success" == false ]]; then
+                # Timeout or failed — kill compress job, delete partial output, copy directly
+                kill "$compress_pid" 2>/dev/null || true
+                wait "$compress_pid" 2>/dev/null || true
+                rm -f "$restore_tmp"
+                echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$wlog"
+                if ! cp "$snap_compressed" "$restore_tmp"; then
+                    echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$wlog"
+                    return 1
+                fi
+                if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                    rm -f "$restore_tmp"
+                    echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
+                    return 1
+                fi
+            fi
+
+            mv "$restore_tmp" "$live_img"
+            echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
+
+            # Step 4 — Clear tmpfs
+            echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
+            rm -f "$snap_compressed"
+
+            # Step 5 — Restart VM
+            echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$wlog"
             rm -f "$serial"
 
             local accel_raw
@@ -794,7 +754,6 @@ start_freeze_watchdog() {
             local accel_flag="${accel_raw%%|*}"
             local cpu_flag="${accel_raw##*|}"
 
-            # Build port forwards
             local pf_extra=""
             if [[ -f "$_BACKUP_DIR/$vm.conf" ]]; then
                 local pf_conf
@@ -837,7 +796,7 @@ start_freeze_watchdog() {
                 return 1
             fi
 
-            # Wait for SSH then post-recovery
+            # Step 6 — Wait for SSH then post-recovery
             local el=0
             while [[ $el -lt 120 ]]; do
                 if check_ssh_local "$_SSH_PORT"; then
@@ -849,13 +808,10 @@ start_freeze_watchdog() {
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
                         -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
-# Network tuning
 sudo modprobe tcp_bbr 2>/dev/null || true
 sudo sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
 sudo sysctl -w net.core.default_qdisc=fq 2>/dev/null || true
-# Tailscale
 sudo tailscale up || true
-# sshx
 sudo systemctl stop sshx || true
 sudo systemctl disable sshx || true
 sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SF'
@@ -955,98 +911,6 @@ REMOTE
     ) >> "$watchdog_log" 2>&1 &
     disown
     print_status "SUCCESS" "Freeze watchdog running (checks every 20s)"
-}
-
-# ============================================================================
-# PERIODIC SNAPSHOT LOOP
-# ============================================================================
-start_periodic_snapshot() {
-    local vm_name=$1
-    local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
-    local _BACKUP_DIR="$BACKUP_DIR"
-    local _SNAPSHOT_DIR="$SNAPSHOT_DIR"
-
-    (
-        is_running_local() {
-            local vm=$1
-            local pid_file="$_BACKUP_DIR/$vm.pid"
-            [[ -f "$pid_file" ]] || return 1
-            local pid
-            pid=$(cat "$pid_file" 2>/dev/null) || return 1
-            kill -0 "$pid" 2>/dev/null && return 0
-            return 1
-        }
-
-        local wlog="$watchdog_log"
-        local live_img="$_BACKUP_DIR/$vm_name.img"
-        local snap_img="$_SNAPSHOT_DIR/$vm_name.img"
-        local snap_compressed="$_SNAPSHOT_DIR/$vm_name.img.compressed"
-
-        # Wait for initial compression before starting loop
-        echo "[$(date '+%H:%M:%S')] Periodic snapshot: waiting for initial compression..." >> "$wlog"
-        while true; do
-            if [[ -f "$snap_compressed" ]] && \
-               [[ ! -f "${snap_compressed}.compressing" ]] && \
-               [[ ! -f "$snap_img" ]]; then
-                break
-            fi
-            sleep 60
-            if ! is_running_local "$vm_name"; then
-                echo "[$(date '+%H:%M:%S')] Periodic snapshot: VM stopped — exiting" >> "$wlog"
-                exit 0
-            fi
-        done
-
-        echo "[$(date '+%H:%M:%S')] Periodic snapshot loop started" >> "$wlog"
-
-        while true; do
-            sleep 1200  # 20 mins between cycles
-
-            if ! is_running_local "$vm_name"; then
-                echo "[$(date '+%H:%M:%S')] Periodic snapshot: VM stopped — exiting" >> "$wlog"
-                exit 0
-            fi
-
-            echo "[$(date '+%H:%M:%S')] === Periodic snapshot cycle ===" >> "$wlog"
-
-            # Delete old compressed snapshot to free space
-            echo "[$(date '+%H:%M:%S')] Deleting old compressed snapshot..." >> "$wlog"
-            rm -f "$snap_compressed"
-
-            # Check space
-            local free_kb
-            free_kb=$(df -k "/" 2>/dev/null | awk 'NR==2{print $4}')
-            local free_gb=$(( free_kb / 1024 / 1024 ))
-            if [[ $free_gb -lt 8 ]]; then
-                echo "[$(date '+%H:%M:%S')] Not enough space (${free_gb}G free) — skipping cycle" >> "$wlog"
-                continue
-            fi
-
-            # Copy live image
-            echo "[$(date '+%H:%M:%S')] Copying live image to tmpfs..." >> "$wlog"
-            if ! cp "$live_img" "$snap_img"; then
-                echo "[$(date '+%H:%M:%S')] Copy failed — skipping cycle" >> "$wlog"
-                continue
-            fi
-            echo "[$(date '+%H:%M:%S')] Copy done ($(du -sh "$snap_img" | awk '{print $1}'))" >> "$wlog"
-
-            # Compress
-            echo "[$(date '+%H:%M:%S')] Compressing snapshot..." >> "$wlog"
-            local tmp_c="${snap_compressed}.compressing"
-            if qemu-img convert -O qcow2 -c "$snap_img" "$tmp_c" >> "$wlog" 2>&1; then
-                mv "$tmp_c" "$snap_compressed"
-                rm -f "$snap_img"
-                local sz
-                sz=$(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')
-                echo "[$(date '+%H:%M:%S')] Snapshot updated: $sz compressed" >> "$wlog"
-            else
-                rm -f "$tmp_c"
-                echo "[$(date '+%H:%M:%S')] Compression failed — keeping uncompressed" >> "$wlog"
-            fi
-        done
-    ) >> "$watchdog_log" 2>&1 &
-    disown
-    print_status "SUCCESS" "Periodic snapshot loop started"
 }
 
 # ============================================================================
@@ -1270,7 +1134,6 @@ create_new_vm() {
     GUI_MODE=false
 
     LIVE_IMG="$BACKUP_DIR/$VM_NAME.img"
-    SNAPSHOT_IMG="$SNAPSHOT_DIR/$VM_NAME.img"
     SNAPSHOT_COMPRESSED="$SNAPSHOT_DIR/$VM_NAME.img.compressed"
     SEED_FILE="$BACKUP_DIR/$VM_NAME-seed.iso"
     CREATED="$(date)"
@@ -1310,7 +1173,6 @@ EOF
         cloud-localds "$SEED_FILE" /tmp/vps-user-data /tmp/vps-meta-data
     fi
 
-    ensure_snapshot "$vm_name" || print_status "WARN" "Could not create snapshot — continuing without"
 
     rm -f "$BACKUP_DIR/$vm_name.serial.log"
     > "$BACKUP_DIR/$vm_name.watchdog.log"
@@ -1326,7 +1188,6 @@ if ! build_and_run_qemu "$vm_name"; then
     fi
 
     start_freeze_watchdog "$vm_name"
-    start_periodic_snapshot "$vm_name"
 
     if wait_for_ssh "$vm_name"; then
         sleep 10
@@ -1381,10 +1242,8 @@ attach_watchdog() {
 
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
     echo "[$(date '+%H:%M:%S')] Watchdog manually attached" >> "$watchdog_log"
-    ensure_snapshot "$vm_name" || true
     start_freeze_watchdog "$vm_name"
-    start_periodic_snapshot "$vm_name"
-    print_status "SUCCESS" "Watchdog + snapshot loop attached"
+    print_status "SUCCESS" "Watchdog loop attached"
     print_status "INFO"    "Monitor: tail -f $watchdog_log"
 }
 
@@ -1398,10 +1257,9 @@ show_vm_info() {
     local status="Stopped"
     is_vm_running "$vm_name" && status="Running"
 
-    local snap_status="None"
+    local snap_status="Only created during freeze recovery"
     [[ -f "$SNAPSHOT_COMPRESSED" ]] && snap_status="Compressed ($(du -sh "$SNAPSHOT_COMPRESSED" | awk '{print $1}')) — ready"
     [[ -f "${SNAPSHOT_COMPRESSED}.compressing" ]] && snap_status="Compressing in progress..."
-    [[ -f "$SNAPSHOT_IMG" ]] && [[ ! -f "${SNAPSHOT_COMPRESSED}.compressing" ]] && snap_status="Uncompressed copy exists"
 
     local accel="KVM"
     [[ ! -w /dev/kvm ]] && accel="TCG (software)"
@@ -1456,7 +1314,7 @@ delete_vm() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         is_vm_running "$vm_name" && kill_vm "$vm_name"
-        rm -f "$LIVE_IMG" "$SNAPSHOT_IMG" "$SNAPSHOT_COMPRESSED"
+        rm -f "$LIVE_IMG" "$SNAPSHOT_COMPRESSED"
         rm -f "${SNAPSHOT_COMPRESSED}.compressing" "$SEED_FILE"
         rm -f "$BACKUP_DIR/$vm_name.conf" "$BACKUP_DIR/$vm_name.pid"
         rm -f "$BACKUP_DIR/$vm_name.serial.log" "$BACKUP_DIR/$vm_name.watchdog.log"
@@ -1545,8 +1403,6 @@ show_vm_performance() {
     echo ""
     echo "Acceleration: $( [[ -w /dev/kvm ]] && echo 'KVM (hardware)' || echo 'TCG (software)' )"
     echo "Live image:   $(du -sh "$LIVE_IMG" 2>/dev/null | awk '{print $1}')"
-    [[ -f "$SNAPSHOT_IMG" ]]        && echo "Snapshot:     $(du -sh "$SNAPSHOT_IMG" 2>/dev/null | awk '{print $1}') (uncompressed — compressing...)"
-    [[ -f "$SNAPSHOT_COMPRESSED" ]] && echo "Snapshot:     $(du -sh "$SNAPSHOT_COMPRESSED" 2>/dev/null | awk '{print $1}') (compressed — ready)"
     echo ""
     df -h /home | tail -1 | awk '{print "/home:   " $4 " free of " $2}'
     df -h /     | tail -1 | awk '{print "tmpfs:   " $4 " free of " $2}'
@@ -1616,8 +1472,6 @@ main_menu() {
                 else
                     sc="${RED}Stopped${NC}"
                 fi
-                [[ -f "$SNAPSHOT_DIR/${vms[$i]}.img.compressed" ]] && snap_indicator=" ${GREEN}[snapshot ready]${NC}"
-                [[ -f "$SNAPSHOT_DIR/${vms[$i]}.img" ]]            && snap_indicator=" ${YELLOW}[compressing...]${NC}"
                 printf "  %2d) %s (" $((i+1)) "${vms[$i]}"
                 echo -e "$sc)$snap_indicator"
             done
