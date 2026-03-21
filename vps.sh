@@ -376,13 +376,19 @@ if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
         && sudo bash /tmp/nexus-restart.sh \
         && rm -f /tmp/nexus-restart.sh
 fi
+REMOTE
 
-# ---- VNC + websockify + Firefox auto-restore ----
+    # ---- VNC + websockify + Firefox — separate root SSH call ----
+    # Must be a separate call with unquoted heredoc so $pass expands correctly
+    # and runs as root directly
+    print_status "INFO" "Setting up VNC + Firefox auto-restore..."
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
+set -e
 
 # Write Firefox user.js for silent session restore
-FIREFOX_PROFILE=$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
-if [[ -n "$FIREFOX_PROFILE" ]]; then
-    cat > "$FIREFOX_PROFILE/user.js" <<'USERJS'
+FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
+if [[ -n "\$FIREFOX_PROFILE" ]]; then
+    cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
 user_pref("browser.startup.page", 3);
 user_pref("browser.sessionstore.resume_from_crash", true);
 user_pref("browser.sessionstore.max_resumed_crashes", -1);
@@ -391,7 +397,7 @@ user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
 USERJS
-    echo "Firefox user.js written to $FIREFOX_PROFILE"
+    echo "Firefox user.js written to \$FIREFOX_PROFILE"
 fi
 
 # Set VNC password to match VM password
@@ -402,13 +408,13 @@ chmod 600 /root/.vnc/passwd
 # Ensure xstartup exists
 cat > /root/.vnc/xstartup <<'XSTART'
 #!/bin/bash
-xrdb $HOME/.Xresources 2>/dev/null || true
+xrdb \$HOME/.Xresources 2>/dev/null || true
 startxfce4 &
 XSTART
 chmod +x /root/.vnc/xstartup
 
 # ---- vncserver systemd service ----
-sudo tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
+tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
 [Unit]
 Description=TightVNC Server
 After=network.target
@@ -431,7 +437,7 @@ WantedBy=multi-user.target
 VNCSVC
 
 # ---- websockify systemd service ----
-sudo tee /etc/systemd/system/websockify.service > /dev/null <<'WEBSVC'
+tee /etc/systemd/system/websockify.service > /dev/null <<'WEBSVC'
 [Unit]
 Description=WebSockify noVNC proxy
 After=network.target
@@ -451,7 +457,7 @@ WantedBy=multi-user.target
 WEBSVC
 
 # ---- Firefox VNC systemd service ----
-sudo tee /etc/systemd/system/firefox-vnc.service > /dev/null <<'FFVSVC'
+tee /etc/systemd/system/firefox-vnc.service > /dev/null <<'FFVSVC'
 [Unit]
 Description=Firefox on VNC display for idx session
 After=network.target
@@ -473,15 +479,15 @@ RestartSec=10
 WantedBy=multi-user.target
 FFVSVC
 
-sudo systemctl daemon-reload
-sudo systemctl enable vncserver websockify firefox-vnc
-sudo systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable vncserver websockify firefox-vnc
+systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
 sleep 2
-sudo systemctl start vncserver
+systemctl start vncserver
 sleep 3
-sudo systemctl start websockify
+systemctl start websockify
 sleep 5
-sudo systemctl start firefox-vnc
+systemctl start firefox-vnc
 echo "VNC + websockify + Firefox services started"
 REMOTE
 
