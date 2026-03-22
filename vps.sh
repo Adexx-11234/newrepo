@@ -636,6 +636,8 @@ freeze_recovery() {
     echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$watchdog_log"
     rm -rf "${SNAPSHOT_DIR:?}"/*
     echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$watchdog_log"
+    # Ensure SNAPSHOT_DIR exists after wipe
+    mkdir -p "${SNAPSHOT_DIR:?}"
 
     # Step 1 — Kill frozen VM
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
@@ -801,6 +803,9 @@ start_freeze_watchdog() {
             echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$wlog"
             rm -rf "${_SNAPSHOT_DIR:?}"/*
             echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$wlog"
+
+            # Ensure SNAPSHOT_DIR exists after wipe
+            mkdir -p "${SNAPSHOT_DIR:?}"
 
             # Step 1 — Kill the frozen VM first
             echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
@@ -1305,6 +1310,7 @@ EOF
     # Wipe tmpfs before starting — ensure no leftover files from previous session
     print_status "INFO" "Cleaning tmpfs before start..."
     rm -rf "${SNAPSHOT_DIR:?}"/*
+    mkdir -p "${SNAPSHOT_DIR:?}"
 
     print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH: port $SSH_PORT | user: $USERNAME | pass: $PASSWORD"
@@ -1699,8 +1705,15 @@ main_menu() {
 # ============================================================================
 trap cleanup EXIT
 check_dependencies
+
+# Ensure BACKUP_DIR exists
 mkdir -p "$BACKUP_DIR"
-mkdir -p "$SNAPSHOT_DIR"
+
+# Ensure SNAPSHOT_DIR exists and is mounted as tmpfs
+if ! mountpoint -q "$SNAPSHOT_DIR" 2>/dev/null; then
+    mkdir -p "$SNAPSHOT_DIR"
+    mount -t tmpfs -o size=16G tmpfs "$SNAPSHOT_DIR" 2>/dev/null || true
+fi
 
 declare -A OS_OPTIONS=(
     ["Ubuntu 22.04 (minimal)"]="ubuntu|jammy|https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
